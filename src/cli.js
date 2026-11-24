@@ -41,7 +41,7 @@ Usage:
 Defaults (LEZ 0.4 rc3):
   --sequencer ${DEFAULT_CONFIG.sequencer}
   --registry  ${DEFAULT_CONFIG.registry}
-  --storage   ${DEFAULT_CONFIG.storageApi}`);
+  --storage   ${DEFAULT_CONFIG.storageApi || "(not set — pass a real Logos Storage API URL; port 8080 is Logos Blockchain)"}`);
 }
 
 const { positional, flags } = parseArgs(process.argv.slice(2));
@@ -64,14 +64,19 @@ if (cmd === "serve") {
   console.log(`LNS Browser listening on ${addr.url}`);
   console.log(`  Sequencer: ${instance.config.sequencer}`);
   console.log(`  Registry:  ${instance.config.registry}`);
-  console.log(`  Storage:   ${instance.config.storageApi}`);
+  console.log(`  Storage:   ${instance.config.storageApi || "(not configured — set in Settings or pass --storage URL)"}`);
 } else if (cmd === "publish") {
   const target = positional[1];
   if (!target) {
     console.error("error: specify a file or directory to publish");
     process.exit(1);
   }
-  const storage = new StorageClient(flags.storage || DEFAULT_CONFIG.storageApi);
+  const storageUrl = flags.storage || DEFAULT_CONFIG.storageApi;
+  if (!storageUrl) {
+    console.error("error: pass --storage <URL> (or set LOGOS_STORAGE_API) pointing to a real Logos Storage node. Note: port 8080 is Logos Blockchain, not Storage.");
+    process.exit(1);
+  }
+  const storage = new StorageClient(storageUrl);
   const result = await publishPath(storage, target, {
     title: typeof flags.title === "string" ? flags.title : null,
   });

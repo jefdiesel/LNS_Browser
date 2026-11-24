@@ -238,17 +238,29 @@ export function createBrowserServer(options = {}) {
       if (req.method === "GET" && pathname === "/api/config") {
         let storageOnline = false;
         let storagePeerId = null;
-        try {
-          const info = await storage.info();
-          storageOnline = true;
-          storagePeerId = info?.id ?? null;
-        } catch {
-          storageOnline = false;
+        let storageMock = false;
+        let storageError = null;
+        if (storage.configured) {
+          try {
+            const info = await storage.info();
+            storageOnline = true;
+            storagePeerId = info?.id ?? null;
+            storageMock = Boolean(info?.mock) || info?.id === "16Uiu2HAmLocalLogosStorageSeed";
+          } catch (err) {
+            storageOnline = false;
+            storageError = err.message;
+          }
         }
         sendJson(res, 200, {
           ok: true,
           config: { ...config },
-          storage: { online: storageOnline, peerId: storagePeerId },
+          storage: {
+            configured: storage.configured,
+            online: storageOnline,
+            mock: storageMock,
+            peerId: storagePeerId,
+            error: storageError,
+          },
         });
         return;
       }
@@ -261,7 +273,7 @@ export function createBrowserServer(options = {}) {
         if (typeof body.registry === "string" && body.registry.trim()) {
           config.registry = body.registry.trim();
         }
-        if (typeof body.storageApi === "string" && body.storageApi.trim()) {
+        if (typeof body.storageApi === "string") {
           config.storageApi = body.storageApi.trim();
           storage = new StorageClient(config.storageApi, { fetchImpl });
         }

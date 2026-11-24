@@ -241,3 +241,35 @@ test("injectLnsBridge intercepts both lns:// navigation and https:// external li
   const payload = JSON.parse(Buffer.from(link.split("?p=")[1], "base64url").toString("utf-8"));
   assert.deepEqual(payload, { name: "helloworld", html: "<h1>Hi</h1>" });
 });
+
+test("StorageClient refuses publishing to stand-in local-storage.js and reports unreachable CIDs plainly", async () => {
+  assert.equal(DEFAULT_CONFIG.storageApi, "");
+
+  // Stand-in stub server (reports mock: true + 16Uiu2HAmLocalLogosStorageSeed)
+  const standin = createServer((req, res) => {
+    if (req.url === "/api/storage/v1/debug/info") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "16Uiu2HAmLocalLogosStorageSeed", mock: true }));
+      return;
+    }
+    res.writeHead(404);
+    res.end("not found");
+  });
+  await new Promise((r) => standin.listen(0, "127.0.0.1", r));
+  const port = standin.address().port;
+  try {
+    const client = new StorageClient(`http://127.0.0.1:${port}/api/storage/v1`);
+    await assert.rejects(() => client.upload(Buffer.from("<h1>Hi</h1>")), /Refused to publish to the stand-in/i);
+    await assert.rejects(
+      () => client.download("z4W2jXDAE4ZM8yrBS1ThzzKkDLRPEiNPxDYBGA5mGPBdPKZ8pYP"),
+      /not on any Logos Storage node this browser can reach/i,
+    );
+    const unconfigured = new StorageClient("");
+    await assert.rejects(
+      () => unconfigured.download("z4W2jXDAE4ZM8yrBS1ThzzKkDLRPEiNPxDYBGA5mGPBdPKZ8pYP"),
+      /No Logos Storage node is configured/i,
+    );
+  } finally {
+    await new Promise((r) => standin.close(r));
+  }
+});

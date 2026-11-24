@@ -25,7 +25,8 @@ export const GRACE_MS = 2_592_000_000;
 export const DEFAULT_CONFIG = Object.freeze({
   sequencer: "https://lez.nameswallet.app/",
   registry: "6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA",
-  storageApi: "http://127.0.0.1:8080/api/storage/v1",
+  // Never default to port 8080 (Logos Blockchain node's port); user picks their real Logos Storage URL.
+  storageApi: process.env.LOGOS_STORAGE_API || "",
   network: "lez-0.4-rc3",
 });
 

@@ -349,14 +349,25 @@ impl LnsBrowserCoreModule for LnsBrowser {
     }
 
     fn storage_status(&mut self) -> String {
+        if self.storage_api.trim().is_empty() {
+            return ok(json!({
+                "online": false,
+                "configured": false,
+                "storage_api": "",
+                "reason": "No external Logos Storage API URL configured (use Basecamp's built-in Storage module or set one in Settings).",
+            }));
+        }
         match self.client().debug_info() {
             Ok(info) => ok(json!({
                 "online": true,
+                "configured": true,
                 "storage_api": self.storage_api,
                 "peer_id": info["id"],
+                "mock": info["mock"].as_bool().unwrap_or(false) || info["id"].as_str() == Some("16Uiu2HAmLocalLogosStorageSeed"),
             })),
             Err(e) => ok(json!({
                 "online": false,
+                "configured": true,
                 "storage_api": self.storage_api,
                 "reason": e,
             })),
@@ -373,10 +384,14 @@ impl LnsBrowserCoreModule for LnsBrowser {
         };
         if let Some(api) = parsed["storage_api"].as_str() {
             let trimmed = api.trim();
-            if !is_allowed_storage_url(trimmed) {
-                return err("storage_api must start with http://127.0.0.1, http://localhost, or https://");
+            if trimmed.is_empty() {
+                self.storage_api.clear();
+            } else {
+                if !is_allowed_storage_url(trimmed) {
+                    return err("storage_api must start with http://127.0.0.1, http://localhost, or https://");
+                }
+                self.storage_api = trimmed.trim_end_matches('/').to_owned();
             }
-            self.storage_api = trimmed.trim_end_matches('/').to_owned();
         }
         self.config_get()
     }

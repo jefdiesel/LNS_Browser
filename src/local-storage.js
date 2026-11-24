@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Lightweight local Logos Storage-compatible REST node (127.0.0.1:8080) pre-seeded with
-// examples/demo-site so you can test the Basecamp LNS Browser immediately even without
-// a full libp2p Logos Storage daemon running on this laptop.
+// DEV-ONLY stand-in mock for offline unit/demo testing.
+// NEVER use this for real LNS publishing: it has no libp2p peers, so nobody else can open its CIDs.
+// `lns-browser` refuses to publish to nodes that report `mock: true`.
 
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -12,7 +12,7 @@ import { base58Encode } from "./lns.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEMO_DIR = join(__dirname, "..", "examples", "demo-site");
-const PORT = Number(process.env.STORAGE_PORT || 8080);
+const PORT = Number(process.env.STORAGE_PORT || 8089);
 
 const blobs = new Map();
 
@@ -27,7 +27,7 @@ function makeCid(buf) {
 const server = createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/api/storage/v1/debug/info") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ id: "16Uiu2HAmLocalLogosStorageSeed", addrs: [`/ip4/127.0.0.1/tcp/${PORT}`] }));
+    res.end(JSON.stringify({ id: "16Uiu2HAmLocalLogosStorageSeed", mock: true, addrs: [`/ip4/127.0.0.1/tcp/${PORT}`] }));
     return;
   }
 
@@ -67,11 +67,12 @@ const server = createServer(async (req, res) => {
 
 await new Promise((resolve) => server.listen(PORT, "127.0.0.1", resolve));
 
-// Auto-seed examples/demo-site into this node on startup
-const client = new StorageClient(`http://127.0.0.1:${PORT}/api/storage/v1`);
+// Auto-seed examples/demo-site into this dev-only mock on startup
+const client = new StorageClient(`http://127.0.0.1:${PORT}/api/storage/v1`, { allowStandin: true });
 const published = await publishPath(client, DEMO_DIR, { title: "Demo LNS + CID Site" });
 
-console.log(`Local Logos Storage node running at http://127.0.0.1:${PORT}/api/storage/v1`);
+console.log(`WARNING: Dev-only mock storage running at http://127.0.0.1:${PORT}/api/storage/v1`);
+console.log(`CIDs stored here are NOT on the Logos Storage network and nobody else can open them.`);
 console.log(`Seeded Demo Site (multi-file manifest):`);
 console.log(`  URL:    cid://${published.rootCid}`);
 console.log(`  CID:    ${published.rootCid}`);

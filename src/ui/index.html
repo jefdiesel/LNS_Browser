@@ -375,8 +375,8 @@
         <input id="cfg-reg">
       </div>
       <div class="field">
-        <label>Local Logos Storage API</label>
-        <input id="cfg-storage">
+        <label>Logos Storage Node API URL (leave blank if none; port 8080 is Logos Blockchain)</label>
+        <input id="cfg-storage" placeholder="e.g. http://127.0.0.1:<storage-port>/api/storage/v1">
       </div>
       <button class="primary-btn" id="btn-save-cfg">Save Settings</button>
       <div id="cfg-status"></div>
@@ -426,10 +426,16 @@
       if (!data.ok) return;
       $("stat-seq").textContent = data.config.sequencer;
       $("stat-reg").textContent = data.config.registry;
-      $("stat-storage").textContent = data.storage.online
-        ? `Online (${data.config.storageApi})`
-        : `Offline (${data.config.storageApi})`;
-      $("storage-dot").classList.toggle("on", data.storage.online);
+      if (!data.storage.configured) {
+        $("stat-storage").textContent = "Not configured (set real Logos Storage URL in Settings)";
+      } else if (data.storage.online && data.storage.mock) {
+        $("stat-storage").textContent = `Stand-in mock only (${data.config.storageApi}) — publishing disabled`;
+      } else if (data.storage.online) {
+        $("stat-storage").textContent = `Online (${data.config.storageApi})`;
+      } else {
+        $("stat-storage").textContent = `Unreachable (${data.config.storageApi})`;
+      }
+      $("storage-dot").classList.toggle("on", Boolean(data.storage.online && !data.storage.mock));
       $("cfg-seq").value = data.config.sequencer;
       $("cfg-reg").value = data.config.registry;
       $("cfg-storage").value = data.config.storageApi;

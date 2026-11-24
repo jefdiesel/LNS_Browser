@@ -11,7 +11,11 @@ use sha2::{Digest, Sha256};
 
 use crate::sanitize::normalize_site_path;
 
-pub const DEFAULT_STORAGE_API: &str = "http://127.0.0.1:8080/api/storage/v1";
+/// No hardcoded HTTP port by default — port 8080 belongs to the Logos Blockchain node.
+/// Inside Basecamp, `lns_browser` uses Basecamp's bundled `storage_module` automatically;
+/// an external Logos Storage REST URL is only used when explicitly configured by the user.
+pub const DEFAULT_STORAGE_API: &str = "";
+pub const STANDIN_SEED_PEER_ID: &str = "16Uiu2HAmLocalLogosStorageSeed";
 pub const MANIFEST_KIND: &str = "lns-site-manifest";
 pub const MANIFEST_MIME: &str = "application/vnd.logos.site-manifest+json";
 pub const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
@@ -173,14 +177,51 @@ impl StorageClient {
         }
     }
 
+    pub fn is_configured(&self) -> bool {
+        !self.base.trim().is_empty()
+    }
+
+    fn require_configured(&self) -> Result<(), String> {
+        if !self.is_configured() {
+            return Err(
+                "No external Logos Storage API URL is configured. Use Basecamp's built-in Storage module or pick a real Logos Storage node URL in Settings (note: port 8080 is the Logos Blockchain node, not Storage)."
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn debug_info(&self) -> Result<Value, String> {
+        self.require_configured()?;
         let resp = self
             .agent
             .get(&format!("{}/debug/info", self.base))
             .call()
-            .map_err(|e| format!("Storage node unreachable: {e}"))?;
-        resp.into_json::<Value>()
-            .map_err(|e| format!("Storage /debug/info bad JSON: {e}"))
+            .map_err(|e| format!("Cannot reach Logos Storage node at {}: {e}", self.base))?;
+        let info = resp
+            .into_json::<Value>()
+            .map_err(|e| format!("{} did not answer like a Logos Storage node: {e}", self.base))?;
+        if info["id"].as_str().unwrap_or("").is_empty() {
+            return Err(format!(
+                "{} did not return a Logos Storage peer ID (port 8080 is Logos Blockchain, not Storage).",
+                self.base
+            ));
+        }
+        Ok(info)
+    }
+
+    /// Refuses publishing to stand-in local-only mock stubs so published CIDs are actually reachable by others.
+    pub fn assert_real_storage_node(&self) -> Result<Value, String> {
+        let info = self.debug_info()?;
+        let is_standin = info["mock"].as_bool() == Some(true)
+            || info["id"].as_str() == Some(STANDIN_SEED_PEER_ID);
+        if is_standin {
+            return Err(
+                "Refused to publish to the local stand-in stub (nobody else can open its CIDs). Use Basecamp's built-in Storage module or a real Logos Storage node."
+                    .to_owned(),
+            );
+        }
+        Ok(info)
     }
 
     pub fn download(
@@ -189,6 +230,7 @@ impl StorageClient {
         expected_sha256: Option<&str>,
         expected_size: Option<usize>,
     ) -> Result<Downloaded, String> {
+        self.require_configured()?;
         if !is_valid_cid(cid) {
             return Err(format!("invalid CID: {cid}"));
         }
@@ -196,7 +238,8 @@ impl StorageClient {
             format!("{}/data/{cid}/network/stream", self.base),
             format!("{}/data/{cid}", self.base),
         ];
-        let mut last_err = String::from("Storage node unreachable");
+        let mut saw_not_found = false;
+        let mut last_err = format!("Cannot reach Logos Storage node at {}", self.base);
         for url in endpoints {
             match self.agent.get(&url).call() {
                 Ok(resp) => {
@@ -238,18 +281,27 @@ impl StorageClient {
                         verified,
                     });
                 }
+                Err(ureq::Error::Status(404, _)) => {
+                    saw_not_found = true;
+                }
                 Err(ureq::Error::Status(code, _)) => {
-                    last_err = format!("Storage returned HTTP {code} for {cid}");
+                    last_err = format!("Storage node returned HTTP {code} for CID {cid}");
                 }
                 Err(e) => {
-                    last_err = format!("Storage request failed: {e}");
+                    last_err = format!("Cannot reach Logos Storage node at {}: {e}", self.base);
                 }
             }
+        }
+        if saw_not_found {
+            return Err(format!(
+                "CID {cid} is not available on any Logos Storage node this browser can reach. It may only exist on a private local node, or no peer is currently seeding it."
+            ));
         }
         Err(last_err)
     }
 
     pub fn upload(&self, filename: &str, mime: &str, bytes: &[u8]) -> Result<(String, String), String> {
+        self.assert_real_storage_node()?;
         let safe_name: String = filename
             .chars()
             .map(|c| if matches!(c, '"' | '\r' | '\n' | '/' | '\\') { '_' } else { c })

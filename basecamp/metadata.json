@@ -17,6 +17,9 @@
       "version": ">=0.1.0"
     }
   ],
+  "optional_dependencies": [
+    "storage_module"
+  ],
   "provides": [
     {
       "intent": "lns.browse",

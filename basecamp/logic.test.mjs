@@ -2,14 +2,22 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   answer,
+  base64ToBytes,
   buildProfileEntries,
   buildPublishDeepLink,
+  bytesToBase64,
+  bytesToUtf8,
   extractSiteInfo,
+  formatUnreachableCidError,
   isExternalHttpsUrl,
+  isPort8080Url,
   isValidName,
   normalizeName,
   parseUrl,
+  sanitizeHtmlFallback,
+  sha256HexUtf8,
   shortHash,
+  utf8ToBytes,
 } from "./qml/logic.mjs";
 
 test("parseUrl normalizes lns://, .lez, @name, and cid:// without ES2018 lookbehind", () => {
@@ -120,4 +128,25 @@ test("buildProfileEntries validates CID and SHA-256", () => {
 test("answer + shortHash", () => {
   assert.deepEqual(answer(JSON.stringify({ success: true, value: { name: "jef" } })), { ok: true, value: { name: "jef" } });
   assert.equal(shortHash("0123456789abcdef0123456789abcdef", 6, 4), "012345...cdef");
+});
+
+test("storage_module helpers: sha256, base64, port 8080 check, unreachable CID error, and HTML fallback", () => {
+  assert.equal(sha256HexUtf8("hello"), "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+  const roundtrip = bytesToUtf8(base64ToBytes(bytesToBase64(utf8ToBytes("Hello → LNS 🌐"))));
+  assert.equal(roundtrip, "Hello → LNS 🌐");
+  assert.equal(isPort8080Url("http://127.0.0.1:8080/api/storage/v1"), true);
+  assert.equal(isPort8080Url("http://localhost:8080"), true);
+  assert.equal(isPort8080Url("http://127.0.0.1:8089/api/storage/v1"), false);
+  const msg = formatUnreachableCidError("z4W2jXDAE4ZM8yrBS1ThzzKkDLRPEiNPxDYBGA5mGPBdPKZ8pYP", "HTTP 404");
+  assert.match(msg, /not on any Logos Storage node this browser can reach/i);
+  const clean = sanitizeHtmlFallback(
+    `<html><head><style>body{background:#fff;color:#111} a{color:#0055ff} .hero{fill:#0055ff}</style></head><body><h1 class="sr">Hi</h1><svg class="hero" viewBox="0 0 10 10"><rect width="10" height="10"/></svg><p><a href="https://nameswallet.app/browser">Go &rarr;</a></p></body></html>`,
+    "lns://helloworld",
+  );
+  assert.equal(clean.bg_color, "#ffffff");
+  assert.equal(clean.fg_color, "#111111");
+  assert.equal(clean.link_color, "#0055ff");
+  assert.equal(clean.blocks.some((b) => b.kind === "image" && b.data_uri.startsWith("data:image/svg+xml;base64,")), true);
+  assert.match(clean.html, /https:\/\/nameswallet\.app\/browser/);
+  assert.match(clean.html, /Go →/);
 });
