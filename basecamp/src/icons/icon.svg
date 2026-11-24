@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="LNS Browser">
+  <rect width="256" height="256" rx="58" fill="#e8662f"/>
+  <g fill="none" stroke="#ffffff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="128" cy="128" r="76"/>
+    <ellipse cx="128" cy="128" rx="34" ry="76"/>
+    <line x1="52" y1="128" x2="204" y2="128"/>
+    <path d="M64 90 C92 100 164 100 192 90"/>
+    <path d="M64 166 C92 156 164 156 192 166"/>
+  </g>
+</svg>

@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LNS Site Builder — WYSIWYG Editor for lns:// Websites</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1f2630;
+      --border: #30363d;
+      --text: #f0f6fc;
+      --muted: #9aa7b8;
+      --accent: #e0b354;
+      --accent-ink: #14110a;
+      --good: #3fb950;
+      --warn: #d29922;
+      --bad: #f85149;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Avenir Next", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); }
+    body { display: flex; flex-direction: column; overflow: hidden; }
+
+    header.topbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .brand { font-weight: 800; letter-spacing: .04em; color: var(--accent); font-size: 14px; text-decoration: none; }
+    .sep { width: 1px; height: 22px; background: var(--border); }
+    .pill {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--muted);
+    }
+    .pill.ok { color: var(--good); border-color: rgba(63,185,80,.4); background: rgba(63,185,80,.12); }
+    .pill.warn { color: var(--warn); border-color: rgba(210,153,34,.45); background: rgba(210,153,34,.12); }
+    .pill.bad { color: var(--bad); border-color: rgba(248,81,73,.45); background: rgba(248,81,73,.12); }
+    .spacer { flex: 1; }
+    .btn {
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 6px 12px;
+      font-size: 12.5px;
+      cursor: pointer;
+      font-weight: 600;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { border-color: var(--accent); }
+    .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+    .btn.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+    .btn.danger { color: var(--bad); }
+    .btn.sm { padding: 4px 8px; font-size: 11.5px; }
+
+    .workspace {
+      flex: 1;
+      display: grid;
+      grid-template-columns: minmax(340px, 460px) 1fr;
+      min-height: 0;
+    }
+    @media (max-width: 900px) {
+      .workspace { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    }
+
+    .editor-pane {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .pane-tabs {
+      display: flex;
+      gap: 6px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      align-items: center;
+    }
+    .pane-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 110px; }
+    .field label { font-size: 11.5px; color: var(--muted); }
+    input[type="text"], input[type="url"], select, textarea {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-family: var(--sans);
+      font-size: 13px;
+      width: 100%;
+    }
+    textarea.mono, input.mono { font-family: var(--mono); font-size: 12px; }
+    textarea { min-height: 70px; resize: vertical; line-height: 1.45; }
+    input[type="color"] {
+      width: 36px;
+      height: 30px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 6px;
+      padding: 2px;
+      cursor: pointer;
+    }
+    .add-bar { display: flex; flex-wrap: wrap; gap: 6px; }
+
+    .preview-pane {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: #0a0d12;
+    }
+    .preview-body {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      position: relative;
+    }
+    iframe#preview-frame {
+      flex: 1;
+      width: 100%;
+      border: 0;
+      background: #fff;
+    }
+    #basecamp-preview {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: none;
+    }
+    .bc-canvas {
+      max-width: 780px;
+      margin: 0 auto;
+      border-radius: 12px;
+      padding: 24px;
+      border: 1px solid var(--border);
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .bc-canvas img { max-width: 100%; height: auto; image-rendering: pixelated; display: block; margin: 0 0 18px; }
+    .bc-meta { font-family: var(--mono); font-size: 11px; opacity: .65; margin-bottom: 14px; }
+
+    .publish-bar {
+      padding: 10px 14px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .publish-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .status-msg { font-size: 12px; font-family: var(--mono); }
+    .status-msg.ok { color: var(--good); }
+    .status-msg.err { color: var(--bad); }
+    .code-inline {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      word-break: break-all;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">LNS:// BUILDER</a>
+    <span class="sep"></span>
+    <span class="pill ok" id="size-pill">0 B · fits on-chain (≤ 78 KB)</span>
+    <span class="pill" id="mode-pill">Zero external requests</span>
+    <span class="spacer"></span>
+    <button class="btn" id="btn-load-hello">Load Hello World Template</button>
+    <button class="btn" id="btn-copy-html">Copy HTML</button>
+    <button class="btn" id="btn-download-html">Download index.html</button>
+    <a class="btn" href="/">Back to Browser</a>
+  </header>
+
+  <main class="workspace">
+    <section class="editor-pane">
+      <div class="pane-tabs">
+        <button class="btn sm active" id="tab-visual">Visual Blocks</button>
+        <button class="btn sm" id="tab-raw">Raw HTML</button>
+        <span class="spacer"></span>
+        <span style="font-size:11.5px;color:var(--muted)">Single self-contained HTML</span>
+      </div>
+
+      <div class="pane-scroll" id="visual-pane">
+        <div class="card">
+          <div class="card-head">Page Settings &amp; Theme</div>
+          <div class="row">
+            <div class="field">
+              <label>Page Title</label>
+              <input type="text" id="page-title" value="Hello World">
+            </div>
+            <div class="field" style="max-width:140px">
+              <label>Font</label>
+              <select id="page-font">
+                <option value="sans">System Sans</option>
+                <option value="serif">Serif</option>
+                <option value="mono">Monospace</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <div class="field" style="max-width:110px">
+              <label>Background</label>
+              <div class="row" style="gap:6px">
+                <input type="color" id="col-bg" value="#ffffff">
+                <input type="text" class="mono" id="hex-bg" value="#ffffff">
+              </div>
+            </div>
+            <div class="field" style="max-width:110px">
+              <label>Text</label>
+              <div class="row" style="gap:6px">
+                <input type="color" id="col-fg" value="#18202c">
+                <input type="text" class="mono" id="hex-fg" value="#18202c">
+              </div>
+            </div>
+            <div class="field" style="max-width:110px">
+              <label>Links / Accent</label>
+              <div class="row" style="gap:6px">
+                <input type="color" id="col-link" value="#0055ff">
+                <input type="text" class="mono" id="hex-link" value="#0055ff">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="blocks-list" style="display:flex;flex-direction:column;gap:10px"></div>
+
+        <div class="card">
+          <div class="card-head">Add Block</div>
+          <div class="add-bar">
+            <button class="btn sm" data-add="pixel">+ Pixel Banner</button>
+            <button class="btn sm" data-add="heading">+ Heading</button>
+            <button class="btn sm" data-add="paragraph">+ Paragraph</button>
+            <button class="btn sm" data-add="link">+ Link</button>
+            <button class="btn sm" data-add="list">+ Bullet List</button>
+            <button class="btn sm" data-add="code">+ Code</button>
+            <button class="btn sm" data-add="image">+ Inline Image</button>
+            <button class="btn sm" data-add="divider">+ Divider</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="pane-scroll" id="raw-pane" style="display:none">
+        <div style="font-size:12px;color:var(--muted)">
+          Edit raw HTML directly. Editing here overrides visual blocks until you click "Reset to Visual Blocks".
+        </div>
+        <textarea id="raw-html" class="mono" style="flex:1;min-height:380px"></textarea>
+        <div class="row">
+          <button class="btn sm" id="btn-sync-from-blocks">Reset to Visual Blocks</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="preview-pane">
+      <div class="pane-tabs">
+        <button class="btn sm active" id="prev-tab-browser">Browser Preview (Full HTML)</button>
+        <button class="btn sm" id="prev-tab-basecamp">Basecamp Native Preview (Zero JS)</button>
+        <span class="spacer"></span>
+        <span style="font-size:11.5px;color:var(--muted)">CSP: connect-src 'none'</span>
+      </div>
+
+      <div class="preview-body">
+        <iframe id="preview-frame" sandbox="allow-scripts"></iframe>
+        <div id="basecamp-preview">
+          <div class="bc-canvas" id="bc-canvas"></div>
+        </div>
+      </div>
+
+      <div class="publish-bar">
+        <div class="publish-row">
+          <input type="text" class="mono" id="pub-name" placeholder="LNS name (e.g. helloworld)" style="max-width:220px">
+          <button class="btn primary" id="btn-upload-cid">1. Upload to Logos Storage CID</button>
+          <button class="btn primary" id="btn-deeplink-page">Publish On-Chain HTML in Names</button>
+          <a class="btn primary" id="btn-deeplink-cid" style="display:none" href="#">2. Bind CID in Names (Deep Link)</a>
+        </div>
+        <div id="pub-status" class="status-msg"></div>
+        <div id="pub-output" class="code-inline" style="display:none"></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const ONCHAIN_LIMIT = 78 * 1024;
+    const $ = (id) => document.getElementById(id);
+
+    // 5x7 pixel bitmap font for crisp inline SVG hero banners
+    const FONT = {
+      A:["01110","10001","10001","11111","10001","10001","10001"],
+      B:["11110","10001","10001","11110","10001","10001","11110"],
+      C:["01111","10000","10000","10000","10000","10000","01111"],
+      D:["11110","10001","10001","10001","10001","10001","11110"],
+      E:["11111","10000","10000","11110","10000","10000","11111"],
+      F:["11111","10000","10000","11110","10000","10000","10000"],
+      G:["01111","10000","10000","10111","10001","10001","01111"],
+      H:["10001","10001","10001","11111","10001","10001","10001"],
+      I:["11111","00100","00100","00100","00100","00100","11111"],
+      J:["00111","00010","00010","00010","10010","10010","01100"],
+      K:["10001","10010","10100","11000","10100","10010","10001"],
+      L:["10000","10000","10000","10000","10000","10000","11111"],
+      M:["10001","11011","10101","10101","10001","10001","10001"],
+      N:["10001","11001","10101","10011","10001","10001","10001"],
+      O:["01110","10001","10001","10001","10001","10001","01110"],
+      P:["11110","10001","10001","11110","10000","10000","10000"],
+      Q:["01110","10001","10001","10001","10101","10010","01101"],
+      R:["11110","10001","10001","11110","10100","10010","10001"],
+      S:["01111","10000","10000","01110","00001","00001","11110"],
+      T:["11111","00100","00100","00100","00100","00100","00100"],
+      U:["10001","10001","10001","10001","10001","10001","01110"],
+      V:["10001","10001","10001","10001","10001","01010","00100"],
+      W:["10001","10001","10001","10101","10101","11011","10001"],
+      X:["10001","10001","01010","00100","01010","10001","10001"],
+      Y:["10001","10001","01010","00100","00100","00100","00100"],
+      Z:["11111","00001","00010","00100","01000","10000","11111"],
+      "0":["01110","10011","10101","10101","11001","10001","01110"],
+      "1":["00100","01100","00100","00100","00100","00100","01110"],
+      "2":["01110","10001","00001","00110","01000","10000","11111"],
+      "3":["11110","00001","00001","01110","00001","00001","11110"],
+      "4":["00010","00110","01010","10010","11111","00010","00010"],
+      "5":["11111","10000","11110","00001","00001","10001","01110"],
+      "6":["01110","10000","11110","10001","10001","10001","01110"],
+      "7":["11111","00001","00010","00100","01000","01000","01000"],
+      "8":["01110","10001","10001","01110","10001","10001","01110"],
+      "9":["01110","10001","10001","01111","00001","00001","01110"],
+      "!":["00100","00100","00100","00100","00100","00000","00100"],
+      ".":["00000","00000","00000","00000","00000","00100","00100"],
+      ":":["00000","00100","00100","00000","00100","00100","00000"],
+      "/":["00001","00010","00010","00100","01000","01000","10000"],
+      "-":["00000","00000","00000","11111","00000","00000","00000"],
+      " ":["000","000","000","000","000","000","000"]
+    };
+
+    const state = {
+      rawOverride: false,
+      previewMode: "browser",
+      title: "Hello World",
+      font: "sans",
+      bg: "#ffffff",
+      fg: "#18202c",
+      link: "#0055ff",
+      blocks: [],
+      lastUpload: null,
+    };
+
+    function esc(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function buildPixelSvg(text, color) {
+      const upper = String(text || "HELLO").toUpperCase().slice(0, 24);
+      let x = 0;
+      const rects = [];
+      for (const ch of upper) {
+        const g = FONT[ch] || FONT[" "];
+        const w = g[0].length;
+        for (let r = 0; r < g.length; r++) {
+          let c = 0;
+          while (c < w) {
+            if (g[r][c] === "1") {
+              const start = c;
+              while (c < w && g[r][c] === "1") c++;
+              rects.push(`M${x + start} ${r}h${c - start}v1h-${c - start}z`);
+            } else {
+              c++;
+            }
+          }
+        }
+        x += w + 1;
+      }
+      const totalW = Math.max(1, x - 1);
+      const fill = /^#[0-9a-f]{6}$/i.test(color) ? color : "#0055ff";
+      const d = rects.join(" ");
+      return `<svg xmlns="http://www.w3.org/2000/svg" class="hero" viewBox="0 0 ${totalW} 7" width="${Math.min(720, totalW * 10)}" height="${Math.max(40, Math.round(Math.min(720, totalW * 10) * 7 / totalW))}" shape-rendering="crispEdges" role="img" aria-label="${esc(upper)}" fill="${fill}"><path d="${d}"/></svg>`;
+    }
+
+    function fontStack(kind) {
+      if (kind === "serif") return "Georgia, Cambria, 'Times New Roman', serif";
+      if (kind === "mono") return "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      return "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+    }
+
+    function generateHtmlFromBlocks() {
+      const hasPixel = state.blocks.some((b) => b.type === "pixel");
+      const parts = [];
+      for (const b of state.blocks) {
+        if (b.type === "pixel") {
+          parts.push(`    <h1 class="sr">${esc(b.text)}</h1>`);
+          parts.push(`    ${buildPixelSvg(b.text, b.color || state.link)}`);
+        } else if (b.type === "heading") {
+          const lvl = ["h1", "h2", "h3"].includes(b.level) ? b.level : "h2";
+          const style = b.color ? ` style="color:${esc(b.color)}"` : "";
+          parts.push(`    <${lvl}${style}>${esc(b.text)}</${lvl}>`);
+        } else if (b.type === "paragraph") {
+          parts.push(`    <p>${esc(b.text)}</p>`);
+        } else if (b.type === "link") {
+          const href = String(b.href || "").trim();
+          if (/^(https:\/\/|lns:\/\/|cid:\/\/|\/)/i.test(href)) {
+            parts.push(`    <p><a href="${esc(href)}">${esc(b.label || href)}</a></p>`);
+          } else {
+            parts.push(`    <p>${esc(b.label || href)}</p>`);
+          }
+        } else if (b.type === "list") {
+          const items = String(b.items || "").split("\n").map((s) => s.trim()).filter(Boolean);
+          parts.push(`    <ul>\n${items.map((it) => `      <li>${esc(it)}</li>`).join("\n")}\n    </ul>`);
+        } else if (b.type === "code") {
+          parts.push(`    <pre><code>${esc(b.text)}</code></pre>`);
+        } else if (b.type === "image" && b.dataUri) {
+          parts.push(`    <p><img src="${esc(b.dataUri)}" alt="${esc(b.alt || "Image")}" style="max-width:100%;height:auto"></p>`);
+        } else if (b.type === "divider") {
+          parts.push(`    <hr>`);
+        }
+      }
+
+      return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(state.title)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: ${esc(state.bg)}; color: ${esc(state.fg)}; font-family: ${fontStack(state.font)}; }
+    main { max-width: 720px; margin: 0 auto; padding: 56px 24px 72px; }
+    ${hasPixel ? ".sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }\n    .hero { display: block; width: 100%; height: auto; margin: 0 0 36px; image-rendering: pixelated; }\n    " : ""}p { font-size: 1.05rem; line-height: 1.72; margin: 0 0 1.2rem; }
+    a { color: ${esc(state.link)}; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+    pre { background: rgba(127,127,127,.1); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+    hr { border: 0; border-top: 1px solid rgba(127,127,127,.25); margin: 24px 0; }
+  </style>
+</head>
+<body>
+  <main>
+${parts.join("\n")}
+  </main>
+</body>
+</html>`;
+    }
+
+    function currentHtml() {
+      return state.rawOverride ? $("raw-html").value : generateHtmlFromBlocks();
+    }
+
+    function utf8Bytes(str) {
+      return new TextEncoder().encode(str).length;
+    }
+
+    function base64UrlEncode(str) {
+      const bytes = new TextEncoder().encode(str);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    function buildDeepLink(payload) {
+      return "basecamp://intent/names.publish_site?p=" + base64UrlEncode(JSON.stringify(payload));
+    }
+
+    function updatePreview() {
+      const html = currentHtml();
+      if (!state.rawOverride) $("raw-html").value = html;
+
+      const bytes = utf8Bytes(html);
+      const pill = $("size-pill");
+      const kb = (bytes / 1024).toFixed(1);
+      if (bytes <= ONCHAIN_LIMIT) {
+        pill.className = "pill ok";
+        pill.textContent = `${bytes.toLocaleString()} B (${kb} KB) · fits On-Chain SetPage & CID`;
+        $("btn-deeplink-page").disabled = false;
+      } else {
+        pill.className = "pill warn";
+        pill.textContent = `${bytes.toLocaleString()} B (${kb} KB) · > 78 KB (use Logos Storage CID)`;
+        $("btn-deeplink-page").disabled = true;
+      }
+
+      // 1. Browser preview
+      $("preview-frame").srcdoc = html;
+
+      // 2. Approximate Basecamp Native Preview (palette + SVG + allowed RichText)
+      const bc = $("bc-canvas");
+      bc.style.background = state.bg;
+      bc.style.color = state.fg;
+      const meta = `<div class="bc-meta">Basecamp native preview · zero JS · zero external network</div>`;
+      if (state.rawOverride) {
+        bc.innerHTML = meta + `<div style="font-size:13px;opacity:.75">Raw HTML preview active — switch to Browser Preview to see exact markup.</div>`;
+      } else {
+        const chunks = [];
+        for (const b of state.blocks) {
+          if (b.type === "pixel") {
+            const svg = buildPixelSvg(b.text, b.color || state.link);
+            const uri = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svg)));
+            chunks.push(`<img src="${uri}" alt="${esc(b.text)}">`);
+          } else if (b.type === "heading") {
+            const lvl = ["h1", "h2", "h3"].includes(b.level) ? b.level : "h2";
+            chunks.push(`<${lvl} style="margin:0 0 12px;color:${esc(b.color || state.fg)}">${esc(b.text)}</${lvl}>`);
+          } else if (b.type === "paragraph") {
+            chunks.push(`<p style="margin:0 0 14px">${esc(b.text)}</p>`);
+          } else if (b.type === "link") {
+            chunks.push(`<p style="margin:0 0 14px"><a href="${esc(b.href)}" onclick="event.preventDefault();alert('Basecamp shows confirmation bar for: '+this.getAttribute('href'))" style="color:${esc(state.link)};font-weight:600">${esc(b.label || b.href)}</a></p>`);
+          } else if (b.type === "list") {
+            const items = String(b.items || "").split("\n").map((s) => s.trim()).filter(Boolean);
+            chunks.push(`<ul>${items.map((it) => `<li>${esc(it)}</li>`).join("")}</ul>`);
+          } else if (b.type === "code") {
+            chunks.push(`<pre style="background:rgba(127,127,127,.12);padding:10px;border-radius:6px"><code>${esc(b.text)}</code></pre>`);
+          } else if (b.type === "image" && b.dataUri) {
+            chunks.push(`<img src="${esc(b.dataUri)}" alt="${esc(b.alt || "Image")}">`);
+          } else if (b.type === "divider") {
+            chunks.push(`<hr>`);
+          }
+        }
+        bc.innerHTML = meta + chunks.join("");
+      }
+    }
+
+    function renderBlocksEditor() {
+      const wrap = $("blocks-list");
+      wrap.innerHTML = "";
+      state.blocks.forEach((b, idx) => {
+        const card = document.createElement("div");
+        card.className = "card";
+        const head = document.createElement("div");
+        head.className = "card-head";
+        head.innerHTML = `<span>${idx + 1}. ${b.type}</span>`;
+        const actions = document.createElement("div");
+        actions.className = "row";
+        const mkBtn = (label, fn, cls = "") => {
+          const btn = document.createElement("button");
+          btn.className = "btn sm " + cls;
+          btn.textContent = label;
+          btn.addEventListener("click", fn);
+          return btn;
+        };
+        actions.appendChild(mkBtn("↑", () => { if (idx > 0) { [state.blocks[idx - 1], state.blocks[idx]] = [state.blocks[idx], state.blocks[idx - 1]]; state.rawOverride = false; renderBlocksEditor(); updatePreview(); } }));
+        actions.appendChild(mkBtn("↓", () => { if (idx < state.blocks.length - 1) { [state.blocks[idx + 1], state.blocks[idx]] = [state.blocks[idx], state.blocks[idx + 1]]; state.rawOverride = false; renderBlocksEditor(); updatePreview(); } }));
+        actions.appendChild(mkBtn("✕", () => { state.blocks.splice(idx, 1); state.rawOverride = false; renderBlocksEditor(); updatePreview(); }, "danger"));
+        head.appendChild(actions);
+        card.appendChild(head);
+
+        if (b.type === "pixel") {
+          const row = document.createElement("div");
+          row.className = "row";
+          const inp = document.createElement("input");
+          inp.type = "text"; inp.value = b.text; inp.placeholder = "HELLO WORLD";
+          inp.addEventListener("input", () => { b.text = inp.value; state.rawOverride = false; updatePreview(); });
+          const col = document.createElement("input");
+          col.type = "color"; col.value = b.color || state.link;
+          col.addEventListener("input", () => { b.color = col.value; state.rawOverride = false; updatePreview(); });
+          row.appendChild(inp); row.appendChild(col);
+          card.appendChild(row);
+        } else if (b.type === "heading") {
+          const row = document.createElement("div");
+          row.className = "row";
+          const sel = document.createElement("select");
+          sel.style.maxWidth = "72px";
+          ["h1", "h2", "h3"].forEach((lv) => { const o = document.createElement("option"); o.value = lv; o.textContent = lv.toUpperCase(); o.selected = b.level === lv; sel.appendChild(o); });
+          sel.addEventListener("change", () => { b.level = sel.value; state.rawOverride = false; updatePreview(); });
+          const inp = document.createElement("input");
+          inp.type = "text"; inp.value = b.text;
+          inp.addEventListener("input", () => { b.text = inp.value; state.rawOverride = false; updatePreview(); });
+          const col = document.createElement("input");
+          col.type = "color"; col.value = b.color || state.fg;
+          col.addEventListener("input", () => { b.color = col.value; state.rawOverride = false; updatePreview(); });
+          row.appendChild(sel); row.appendChild(inp); row.appendChild(col);
+          card.appendChild(row);
+        } else if (b.type === "paragraph" || b.type === "code" || b.type === "list") {
+          const ta = document.createElement("textarea");
+          if (b.type === "code") ta.className = "mono";
+          ta.value = b.type === "list" ? b.items : b.text;
+          ta.placeholder = b.type === "list" ? "One item per line" : "";
+          ta.addEventListener("input", () => {
+            if (b.type === "list") b.items = ta.value;
+            else b.text = ta.value;
+            state.rawOverride = false;
+            updatePreview();
+          });
+          card.appendChild(ta);
+        } else if (b.type === "link") {
+          const l1 = document.createElement("input");
+          l1.type = "text"; l1.value = b.label; l1.placeholder = "Link text";
+          l1.addEventListener("input", () => { b.label = l1.value; state.rawOverride = false; updatePreview(); });
+          const l2 = document.createElement("input");
+          l2.type = "url"; l2.className = "mono"; l2.value = b.href; l2.placeholder = "https://... or lns://...";
+          l2.addEventListener("input", () => { b.href = l2.value; state.rawOverride = false; updatePreview(); });
+          card.appendChild(l1); card.appendChild(l2);
+        } else if (b.type === "image") {
+          const fi = document.createElement("input");
+          fi.type = "file"; fi.accept = "image/png,image/jpeg,image/webp,image/gif";
+          fi.addEventListener("change", () => {
+            const f = fi.files && fi.files[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = () => { b.dataUri = String(reader.result || ""); b.alt = f.name; state.rawOverride = false; updatePreview(); };
+            reader.readAsDataURL(f);
+          });
+          card.appendChild(fi);
+        }
+        wrap.appendChild(card);
+      });
+    }
+
+    function loadHelloWorldTemplate() {
+      state.rawOverride = false;
+      state.title = "Hello World";
+      state.font = "sans";
+      state.bg = "#ffffff";
+      state.fg = "#18202c";
+      state.link = "#0055ff";
+      state.blocks = [
+        { type: "pixel", text: "HELLO WORLD", color: "#0055ff" },
+        { type: "paragraph", text: "This page lives directly on the Logos Execution Zone (LEZ) chain inside the page account for its LNS name. There is no web server, hosting provider, or DNS record in the middle: when you open an lns:// address, your client derives the name's on-chain account and decryption key locally, fetches the sealed bytes straight from the chain, and renders the HTML in your browser." },
+        { type: "paragraph", text: "Only the holder of the name can sign a transaction to publish or update the page, while anyone who knows the name can read the exact document stored on chain. Because everything—the layout, styles, and pixel lettering above—is packed into a single self-contained HTML payload with no external dependencies, the site stays fast, verifiable, and online for as long as the chain is reachable." },
+        { type: "link", label: "Open the LNS Browser at nameswallet.app/browser →", href: "https://nameswallet.app/browser" },
+      ];
+      $("page-title").value = state.title;
+      $("page-font").value = state.font;
+      $("col-bg").value = $("hex-bg").value = state.bg;
+      $("col-fg").value = $("hex-fg").value = state.fg;
+      $("col-link").value = $("hex-link").value = state.link;
+      renderBlocksEditor();
+      updatePreview();
+    }
+
+    function bindColor(colId, hexId, key) {
+      $(colId).addEventListener("input", () => {
+        state[key] = $(colId).value;
+        $(hexId).value = state[key];
+        state.rawOverride = false;
+        updatePreview();
+      });
+      $(hexId).addEventListener("input", () => {
+        const v = $(hexId).value.trim();
+        if (/^#[0-9a-f]{6}$/i.test(v)) {
+          state[key] = v.toLowerCase();
+          $(colId).value = state[key];
+          state.rawOverride = false;
+          updatePreview();
+        }
+      });
+    }
+    bindColor("col-bg", "hex-bg", "bg");
+    bindColor("col-fg", "hex-fg", "fg");
+    bindColor("col-link", "hex-link", "link");
+
+    $("page-title").addEventListener("input", () => { state.title = $("page-title").value; state.rawOverride = false; updatePreview(); });
+    $("page-font").addEventListener("change", () => { state.font = $("page-font").value; state.rawOverride = false; updatePreview(); });
+    $("raw-html").addEventListener("input", () => { state.rawOverride = true; updatePreview(); });
+    $("btn-sync-from-blocks").addEventListener("click", () => { state.rawOverride = false; updatePreview(); });
+
+    $("tab-visual").addEventListener("click", () => {
+      $("visual-pane").style.display = "flex"; $("raw-pane").style.display = "none";
+      $("tab-visual").classList.add("active"); $("tab-raw").classList.remove("active");
+    });
+    $("tab-raw").addEventListener("click", () => {
+      $("visual-pane").style.display = "none"; $("raw-pane").style.display = "flex";
+      $("tab-raw").classList.add("active"); $("tab-visual").classList.remove("active");
+    });
+
+    $("prev-tab-browser").addEventListener("click", () => {
+      $("preview-frame").style.display = "block"; $("basecamp-preview").style.display = "none";
+      $("prev-tab-browser").classList.add("active"); $("prev-tab-basecamp").classList.remove("active");
+    });
+    $("prev-tab-basecamp").addEventListener("click", () => {
+      $("preview-frame").style.display = "none"; $("basecamp-preview").style.display = "block";
+      $("prev-tab-basecamp").classList.add("active"); $("prev-tab-browser").classList.remove("active");
+    });
+
+    document.querySelectorAll("[data-add]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const t = btn.dataset.add;
+        if (t === "pixel") state.blocks.push({ type: "pixel", text: "LOGOS", color: state.link });
+        else if (t === "heading") state.blocks.push({ type: "heading", level: "h2", text: "Section Heading", color: state.fg });
+        else if (t === "paragraph") state.blocks.push({ type: "paragraph", text: "Write your paragraph here." });
+        else if (t === "link") state.blocks.push({ type: "link", label: "Visit lns://jef", href: "lns://jef" });
+        else if (t === "list") state.blocks.push({ type: "list", items: "First point\nSecond point" });
+        else if (t === "code") state.blocks.push({ type: "code", text: "lns://helloworld" });
+        else if (t === "image") state.blocks.push({ type: "image", dataUri: "", alt: "" });
+        else if (t === "divider") state.blocks.push({ type: "divider" });
+        state.rawOverride = false;
+        renderBlocksEditor();
+        updatePreview();
+      });
+    });
+
+    $("btn-load-hello").addEventListener("click", loadHelloWorldTemplate);
+
+    $("btn-copy-html").addEventListener("click", async () => {
+      await navigator.clipboard.writeText(currentHtml());
+      $("pub-status").className = "status-msg ok";
+      $("pub-status").textContent = "Copied self-contained HTML to clipboard.";
+    });
+
+    $("btn-download-html").addEventListener("click", () => {
+      const blob = new Blob([currentHtml()], { type: "text/html;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "index.html";
+      a.click();
+    });
+
+    $("btn-deeplink-page").addEventListener("click", () => {
+      const name = $("pub-name").value.trim().toLowerCase().replace(/^lns:\/\//, "").replace(/\.lez$/, "");
+      if (!name) {
+        $("pub-status").className = "status-msg err";
+        $("pub-status").textContent = "Enter your LNS name first (e.g. helloworld).";
+        return;
+      }
+      const html = currentHtml();
+      if (utf8Bytes(html) > ONCHAIN_LIMIT) {
+        $("pub-status").className = "status-msg err";
+        $("pub-status").textContent = "Page exceeds 78 KB on-chain SetPage cap; use Logos Storage CID instead.";
+        return;
+      }
+      const link = buildDeepLink({ name, html, return_app: "lns_browser" });
+      $("pub-status").className = "status-msg ok";
+      $("pub-status").textContent = "Opening Names to verify ownership & publish on-chain HTML...";
+      $("pub-output").style.display = "block";
+      $("pub-output").textContent = link;
+      window.location.href = link;
+    });
+
+    $("btn-upload-cid").addEventListener("click", async () => {
+      const name = $("pub-name").value.trim().toLowerCase().replace(/^lns:\/\//, "").replace(/\.lez$/, "");
+      $("pub-status").className = "status-msg";
+      $("pub-status").textContent = "Uploading to local Logos Storage node...";
+      try {
+        const res = await fetch("/api/publish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, files: { "/index.html": currentHtml() } }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || "Upload failed");
+        state.lastUpload = data;
+        const deepLink = data.deepLink || buildDeepLink({ name, cid: data.rootCid, sha256: data.sha256, site_type: data.mode, return_app: "lns_browser" });
+        const linkBtn = $("btn-deeplink-cid");
+        linkBtn.href = deepLink;
+        linkBtn.style.display = "inline-flex";
+        $("pub-status").className = "status-msg ok";
+        $("pub-status").textContent = `Uploaded! CID: ${data.rootCid} (sha256: ${data.sha256.slice(0, 12)}…)`;
+        $("pub-output").style.display = "block";
+        $("pub-output").textContent = `Deep link: ${deepLink}\nCLI: ${data.namesCommand}`;
+      } catch (err) {
+        $("pub-status").className = "status-msg err";
+        $("pub-status").textContent = "Upload failed (is lns-browser + local Logos Storage running?): " + err.message;
+      }
+    });
+
+    loadHelloWorldTemplate();
+  </script>
+</body>
+</html>

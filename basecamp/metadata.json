@@ -1,0 +1,55 @@
+{
+  "name": "lns_browser",
+  "display_name": "LNS Browser",
+  "version": "0.2.0",
+  "type": "ui_qml",
+  "category": "web",
+  "description": "Native in-Basecamp web browser for LNS URLs and SHA-256 verified Logos Storage CID sites (zero external network leaks)",
+  "view": "qml/Main.qml",
+  "icon": "src/icons/icon.png",
+  "dependencies": [
+    {
+      "name": "names",
+      "version": ">=0.10.0"
+    },
+    {
+      "name": "lns_browser_core",
+      "version": ">=0.1.0"
+    }
+  ],
+  "provides": [
+    {
+      "intent": "lns.browse",
+      "params": [
+        {
+          "name": "url",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "handoff": true,
+      "web": true
+    }
+  ],
+  "uses": [
+    {
+      "intent": "names.open"
+    },
+    {
+      "intent": "names.publish_site"
+    }
+  ],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "lns_browser_core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Core module for the native Basecamp LNS + CID Web Browser"
+
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+logos-rust-sdk = { path = "../logos-rust-sdk-src" }

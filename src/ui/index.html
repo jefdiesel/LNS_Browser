@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LNS Browser — Logos Names &amp; CID Web</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1f2630;
+      --border: #30363d;
+      --text: #f0f6fc;
+      --muted: #9aa7b8;
+      --accent: #e0b354;
+      --accent-ink: #14110a;
+      --good: #3fb950;
+      --warn: #d29922;
+      --bad: #f85149;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Avenir Next", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); }
+    body { display: flex; flex-direction: column; overflow: hidden; }
+
+    /* Top browser chrome */
+    .chrome {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .brand {
+      font-weight: 700;
+      letter-spacing: .04em;
+      font-size: 13px;
+      color: var(--accent);
+      padding-right: 6px;
+      white-space: nowrap;
+    }
+    .nav-btn {
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      height: 34px;
+      min-width: 34px;
+      padding: 0 10px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .nav-btn:hover:not(:disabled) { border-color: var(--accent); }
+    .nav-btn:disabled { opacity: .4; cursor: default; }
+    .nav-btn.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+
+    .url-form {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0 6px 0 10px;
+      height: 36px;
+      gap: 8px;
+    }
+    .url-form:focus-within { border-color: var(--accent); }
+    .badge {
+      font-size: 11px;
+      font-family: var(--mono);
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .badge.verified { background: rgba(63,185,80,.15); color: var(--good); border: 1px solid rgba(63,185,80,.4); }
+    .badge.unverified { background: rgba(210,153,34,.15); color: var(--warn); border: 1px solid rgba(210,153,34,.4); }
+    .badge.error { background: rgba(248,81,73,.15); color: var(--bad); border: 1px solid rgba(248,81,73,.4); }
+    .url-input {
+      flex: 1;
+      background: transparent;
+      border: 0;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13.5px;
+      outline: none;
+    }
+    .go-btn {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border: 0;
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 12.5px;
+    }
+
+    /* Main workspace */
+    .workspace { flex: 1; display: flex; min-height: 0; position: relative; }
+    .viewport-wrap { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #0a0d12; }
+    iframe#viewport { flex: 1; width: 100%; border: 0; background: #fff; display: none; }
+    .home {
+      flex: 1;
+      overflow-y: auto;
+      padding: 40px 24px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+    }
+    .home-card {
+      max-width: 720px;
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+    }
+    .home-card h1 { margin: 0 0 8px; font-size: 22px; }
+    .home-card p { color: var(--muted); line-height: 1.55; margin: 0 0 18px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+    .chip {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      cursor: pointer;
+    }
+    .chip:hover { border-color: var(--accent); color: var(--accent); }
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .stat {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .stat .val { font-family: var(--mono); font-size: 12.5px; margin-top: 4px; word-break: break-all; }
+
+    /* Side drawer (Inspector / Publish / Settings) */
+    .drawer {
+      width: 390px;
+      max-width: 92vw;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: none;
+      flex-direction: column;
+      overflow-y: auto;
+      padding: 16px;
+      gap: 14px;
+    }
+    .drawer.open { display: flex; }
+    .drawer h2 { margin: 0; font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field label { font-size: 12px; color: var(--muted); }
+    .field input, .field textarea {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 8px 10px;
+      font-family: var(--mono);
+      font-size: 12.5px;
+    }
+    .field textarea { min-height: 180px; resize: vertical; line-height: 1.45; }
+    .primary-btn {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border: 0;
+      border-radius: 7px;
+      padding: 9px 14px;
+      font-weight: 700;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .secondary-btn {
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 12.5px;
+    }
+    .code-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+    .file-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+    .file-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 9px;
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .file-item:hover { border-color: var(--accent); }
+    .msg-error { color: var(--bad); font-size: 12.5px; }
+    .msg-ok { color: var(--good); font-size: 12.5px; }
+
+    /* Bottom status bar */
+    .statusbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 5px 14px;
+      font-size: 11.5px;
+      font-family: var(--mono);
+      color: var(--muted);
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      gap: 12px;
+    }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--bad); }
+    .dot.on { background: var(--good); }
+    .ext-bar {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      background: #1a2130;
+      border-bottom: 1px solid var(--accent);
+      font-size: 12.5px;
+    }
+    .ext-bar.open { display: flex; }
+    .ext-url { flex: 1; font-family: var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header class="chrome">
+    <span class="brand">LNS://</span>
+    <button class="nav-btn" id="btn-back" title="Back" disabled>&#8592;</button>
+    <button class="nav-btn" id="btn-fwd" title="Forward" disabled>&#8594;</button>
+    <button class="nav-btn" id="btn-reload" title="Reload">&#8635;</button>
+    <button class="nav-btn" id="btn-home" title="Home">Home</button>
+
+    <form class="url-form" id="url-form">
+      <span class="badge" id="verify-badge">idle</span>
+      <input class="url-input" id="url-input" placeholder="lns://jef  or  jef.lez/about.html  or  cid://..." autocomplete="off" spellcheck="false">
+      <button class="go-btn" type="submit">Go</button>
+    </form>
+
+    <a class="nav-btn" href="/editor" style="display:inline-flex;align-items:center;text-decoration:none">Build</a>
+    <button class="nav-btn" id="btn-inspect">Inspect</button>
+    <button class="nav-btn" id="btn-publish">Publish</button>
+    <button class="nav-btn" id="btn-settings">Settings</button>
+  </header>
+
+  <div class="ext-bar" id="ext-bar">
+    <span style="color:var(--accent);font-weight:700">External web link:</span>
+    <span class="ext-url" id="ext-url"></span>
+    <button class="primary-btn" id="btn-ext-open" style="padding:5px 10px;font-size:12px">Open in new tab</button>
+    <button class="secondary-btn" id="btn-ext-copy" style="padding:5px 10px;font-size:12px">Copy</button>
+    <button class="secondary-btn" id="btn-ext-close" style="padding:5px 9px;font-size:12px">&times;</button>
+  </div>
+
+  <main class="workspace">
+    <section class="viewport-wrap">
+      <div class="home" id="home-view">
+        <div class="home-card">
+          <h1>Logos Names (LNS) + CID Browser</h1>
+          <p>
+            Resolve <code>lns://&lt;name&gt;</code> URLs privately on LEZ 0.4, fetch the pinned
+            content CID from your local Logos Storage node, verify its SHA-256 hash against the
+            on-chain record, and render it in an isolated sandbox with zero third-party requests.
+          </p>
+          <div class="chips">
+            <button class="chip" data-url="lns://jef">lns://jef</button>
+            <button class="chip" data-url="lns://logos">lns://logos</button>
+          </div>
+          <div id="home-error" class="msg-error"></div>
+          <div class="status-grid">
+            <div class="stat">
+              <div class="label">LEZ Sequencer</div>
+              <div class="val" id="stat-seq">loading...</div>
+            </div>
+            <div class="stat">
+              <div class="label">LNS Registry (0.4 rc3)</div>
+              <div class="val" id="stat-reg">loading...</div>
+            </div>
+            <div class="stat">
+              <div class="label">Logos Storage Node</div>
+              <div class="val" id="stat-storage">checking...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Opaque sandboxed origin: cannot access browser shell, cookies, or /api/* -->
+      <iframe id="viewport" sandbox="allow-scripts"></iframe>
+    </section>
+
+    <aside class="drawer" id="drawer-inspect">
+      <h2>On-Chain &amp; CID Inspector <button class="secondary-btn" data-close>Close</button></h2>
+      <div id="inspect-body" class="code-box">Navigate to an lns:// or cid:// URL to inspect its on-chain record and manifest.</div>
+      <div id="inspect-files-wrap" style="display:none">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Site Manifest Files</div>
+        <ul class="file-list" id="inspect-files"></ul>
+      </div>
+    </aside>
+
+    <aside class="drawer" id="drawer-publish">
+      <h2>Publish Site to CID + LNS <button class="secondary-btn" data-close>Close</button></h2>
+      <div class="field">
+        <label>Target LNS Name (optional, for the on-chain command)</label>
+        <input id="pub-name" placeholder="e.g. jef">
+      </div>
+      <div class="field">
+        <label>Site Title (optional, creates a v1 manifest)</label>
+        <input id="pub-title" placeholder="My Logos Site">
+      </div>
+      <div class="field">
+        <label>Upload folder or files (optional)</label>
+        <input id="pub-files" type="file" multiple>
+      </div>
+      <div class="field">
+        <label>Or edit /index.html directly</label>
+        <textarea id="pub-html">&lt;!doctype html&gt;
+&lt;html&gt;
+&lt;head&gt;
+  &lt;meta charset="utf-8"&gt;
+  &lt;title&gt;Hello Logos&lt;/title&gt;
+  &lt;style&gt;body{font-family:system-ui;max-width:640px;margin:3rem auto;padding:1rem;background:#111;color:#eee}&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;h1&gt;Served from Logos Storage CID&lt;/h1&gt;
+  &lt;p&gt;Resolved via LNS on LEZ 0.4.&lt;/p&gt;
+  &lt;p&gt;&lt;a href="lns://jef"&gt;Visit lns://jef&lt;/a&gt;&lt;/p&gt;
+&lt;/body&gt;
+&lt;/html&gt;</textarea>
+      </div>
+      <button class="primary-btn" id="btn-do-publish">Upload to Logos Storage CID</button>
+      <div id="pub-status"></div>
+      <div id="pub-result" style="display:none;flex-direction:column;gap:8px">
+        <div style="font-size:12px;color:var(--muted)">Root CID</div>
+        <div class="code-box" id="pub-cid"></div>
+        <a class="primary-btn" id="btn-open-names-deeplink" href="#" style="text-align:center;text-decoration:none">Publish in Names (Deep Link)</a>
+        <button class="secondary-btn" id="btn-preview-cid">Open cid:// in Browser</button>
+        <div style="font-size:12px;color:var(--muted)">Or commit via Names CLI</div>
+        <div class="code-box" id="pub-cmd"></div>
+      </div>
+    </aside>
+
+    <aside class="drawer" id="drawer-settings">
+      <h2>Settings <button class="secondary-btn" data-close>Close</button></h2>
+      <div class="field">
+        <label>LEZ Sequencer RPC</label>
+        <input id="cfg-seq">
+      </div>
+      <div class="field">
+        <label>LNS Registry Program ID</label>
+        <input id="cfg-reg">
+      </div>
+      <div class="field">
+        <label>Local Logos Storage API</label>
+        <input id="cfg-storage">
+      </div>
+      <button class="primary-btn" id="btn-save-cfg">Save Settings</button>
+      <div id="cfg-status"></div>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <div><span class="dot" id="storage-dot"></span><span id="status-left">Ready</span></div>
+    <div id="status-right">Loopback sandbox · zero external network leaks</div>
+  </footer>
+
+  <script>
+    const state = { history: [], idx: -1, lastResolution: null, lastPublishedCidUrl: null };
+    const $ = (id) => document.getElementById(id);
+
+    function openDrawer(name) {
+      for (const id of ["inspect", "publish", "settings"]) {
+        const el = $(`drawer-${id}`);
+        const btn = $(`btn-${id}`);
+        const show = id === name && !el.classList.contains("open");
+        el.classList.toggle("open", show);
+        btn.classList.toggle("active", show);
+      }
+    }
+
+    document.querySelectorAll("[data-close]").forEach((btn) =>
+      btn.addEventListener("click", () => openDrawer(null)),
+    );
+    $("btn-inspect").addEventListener("click", () => openDrawer("inspect"));
+    $("btn-publish").addEventListener("click", () => openDrawer("publish"));
+    $("btn-settings").addEventListener("click", () => openDrawer("settings"));
+
+    function setBadge(text, cls = "") {
+      const b = $("verify-badge");
+      b.textContent = text;
+      b.className = "badge" + (cls ? " " + cls : "");
+    }
+
+    function updateNavButtons() {
+      $("btn-back").disabled = state.idx <= 0;
+      $("btn-fwd").disabled = state.idx < 0 || state.idx >= state.history.length - 1;
+    }
+
+    async function refreshConfig() {
+      const res = await fetch("/api/config");
+      const data = await res.json();
+      if (!data.ok) return;
+      $("stat-seq").textContent = data.config.sequencer;
+      $("stat-reg").textContent = data.config.registry;
+      $("stat-storage").textContent = data.storage.online
+        ? `Online (${data.config.storageApi})`
+        : `Offline (${data.config.storageApi})`;
+      $("storage-dot").classList.toggle("on", data.storage.online);
+      $("cfg-seq").value = data.config.sequencer;
+      $("cfg-reg").value = data.config.registry;
+      $("cfg-storage").value = data.config.storageApi;
+    }
+
+    async function navigate(rawUrl, { push = true, refresh = false } = {}) {
+      const target = String(rawUrl || "").trim();
+      if (!target) return;
+      $("url-input").value = target;
+      $("home-error").textContent = "";
+      setBadge("resolving...", "");
+      $("status-left").textContent = `Resolving ${target}...`;
+
+      try {
+        const q = new URLSearchParams({ url: target, ...(refresh ? { refresh: "1" } : {}) });
+        const res = await fetch(`/api/resolve?${q.toString()}`);
+        const data = await res.json();
+        state.lastResolution = data;
+        renderInspector(data);
+
+        if (!data.ok) {
+          setBadge("not found", "error");
+          $("viewport").style.display = "none";
+          $("home-view").style.display = "flex";
+          $("home-error").textContent = data.error || "Resolution failed";
+          $("status-left").textContent = data.error || "Error";
+          return;
+        }
+
+        const canonical = data.parsed.canonical;
+        $("url-input").value = canonical;
+        if (push) {
+          state.history = state.history.slice(0, state.idx + 1);
+          state.history.push(canonical);
+          state.idx = state.history.length - 1;
+          updateNavButtons();
+        }
+
+        if (data.mode === "cid-error") {
+          setBadge("cid error", "error");
+        } else if (data.verified) {
+          setBadge("CID + SHA-256 verified", "verified");
+        } else if (data.cid) {
+          setBadge("CID loaded", "unverified");
+        } else {
+          setBadge("LNS profile", "verified");
+        }
+
+        $("home-view").style.display = "none";
+        const frame = $("viewport");
+        frame.style.display = "block";
+        frame.src = `${data.frameUrl}${refresh ? `?_=${Date.now()}` : ""}`;
+        $("status-left").textContent = `${canonical}${data.cid ? ` → ${data.cid}` : ""}`;
+      } catch (err) {
+        setBadge("error", "error");
+        $("home-error").textContent = err.message;
+        $("status-left").textContent = err.message;
+      }
+    }
+
+    function renderInspector(data) {
+      $("inspect-body").textContent = JSON.stringify(
+        {
+          url: data.parsed?.canonical,
+          mode: data.mode,
+          cid: data.cid,
+          sha256: data.sha256,
+          verified: data.verified,
+          record: data.record,
+          storageError: data.storageError || undefined,
+        },
+        null,
+        2,
+      );
+      const wrap = $("inspect-files-wrap");
+      const list = $("inspect-files");
+      list.innerHTML = "";
+      if (data.manifest && data.manifest.files) {
+        wrap.style.display = "block";
+        for (const [path, info] of Object.entries(data.manifest.files)) {
+          const li = document.createElement("li");
+          li.className = "file-item";
+          li.innerHTML = `<span>${path}</span><span style="color:var(--muted)">${info.cid.slice(0, 12)}…</span>`;
+          li.addEventListener("click", () => {
+            const base = data.parsed.kind === "lns" ? `lns://${data.parsed.name}` : `cid://${data.parsed.cid}`;
+            navigate(`${base}${path}`);
+          });
+          list.appendChild(li);
+        }
+      } else {
+        wrap.style.display = "none";
+      }
+    }
+
+    $("url-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      navigate($("url-input").value);
+    });
+    $("btn-back").addEventListener("click", () => {
+      if (state.idx > 0) {
+        state.idx -= 1;
+        updateNavButtons();
+        navigate(state.history[state.idx], { push: false });
+      }
+    });
+    $("btn-fwd").addEventListener("click", () => {
+      if (state.idx < state.history.length - 1) {
+        state.idx += 1;
+        updateNavButtons();
+        navigate(state.history[state.idx], { push: false });
+      }
+    });
+    $("btn-reload").addEventListener("click", () => {
+      if (state.idx >= 0) navigate(state.history[state.idx], { push: false, refresh: true });
+    });
+    $("btn-home").addEventListener("click", () => {
+      $("viewport").style.display = "none";
+      $("home-view").style.display = "flex";
+      setBadge("idle", "");
+    });
+    document.querySelectorAll(".chip[data-url]").forEach((chip) =>
+      chip.addEventListener("click", () => navigate(chip.dataset.url)),
+    );
+
+    // Handle lns://, cid://, and click-to-confirm https:// link clicks from inside the sandboxed iframe
+    let pendingExternalUrl = "";
+    function showExternalBar(rawUrl) {
+      try {
+        const parsed = new URL(rawUrl);
+        if (parsed.protocol !== "https:" || parsed.username || parsed.password) return;
+        pendingExternalUrl = parsed.href;
+        $("ext-url").textContent = parsed.href;
+        $("ext-bar").classList.add("open");
+      } catch {}
+    }
+    function hideExternalBar() {
+      pendingExternalUrl = "";
+      $("ext-bar").classList.remove("open");
+    }
+    $("btn-ext-open").addEventListener("click", () => {
+      if (pendingExternalUrl) window.open(pendingExternalUrl, "_blank", "noopener,noreferrer");
+      hideExternalBar();
+    });
+    $("btn-ext-copy").addEventListener("click", async () => {
+      if (pendingExternalUrl && navigator.clipboard) {
+        await navigator.clipboard.writeText(pendingExternalUrl);
+        $("status-left").textContent = "Copied external URL to clipboard.";
+      }
+      hideExternalBar();
+    });
+    $("btn-ext-close").addEventListener("click", hideExternalBar);
+
+    window.addEventListener("message", (event) => {
+      if (!event.data) return;
+      if (event.data.type === "lns-navigate" && typeof event.data.url === "string") {
+        hideExternalBar();
+        navigate(event.data.url);
+      } else if (event.data.type === "lns-external-link" && typeof event.data.url === "string") {
+        showExternalBar(event.data.url);
+      }
+    });
+
+    // Publish flow
+    $("btn-do-publish").addEventListener("click", async () => {
+      const status = $("pub-status");
+      status.className = "";
+      status.textContent = "Uploading to Logos Storage...";
+      const files = {};
+      const picked = $("pub-files").files;
+      if (picked && picked.length > 0) {
+        for (const f of picked) {
+          const buf = new Uint8Array(await f.arrayBuffer());
+          let bin = "";
+          for (let i = 0; i < buf.length; i += 1) bin += String.fromCharCode(buf[i]);
+          const rel = f.webkitRelativePath || f.name;
+          files["/" + rel.replace(/^\/+/, "")] = { base64: btoa(bin) };
+        }
+      } else {
+        files["/index.html"] = $("pub-html").value;
+      }
+
+      try {
+        const res = await fetch("/api/publish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: $("pub-name").value.trim(),
+            title: $("pub-title").value.trim(),
+            files,
+          }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || "Publish failed");
+        status.className = "msg-ok";
+        status.textContent = `Uploaded (${data.mode}, ${data.files.length} file${data.files.length === 1 ? "" : "s"})`;
+        $("pub-cid").textContent = `${data.rootCid}\nsha256: ${data.sha256}`;
+        $("pub-cmd").textContent = data.namesCommand;
+        if (data.deepLink) $("btn-open-names-deeplink").href = data.deepLink;
+        state.lastPublishedCidUrl = data.cidUrl;
+        $("pub-result").style.display = "flex";
+      } catch (err) {
+        status.className = "msg-error";
+        status.textContent = err.message;
+      }
+    });
+
+    $("btn-preview-cid").addEventListener("click", () => {
+      if (state.lastPublishedCidUrl) navigate(state.lastPublishedCidUrl);
+    });
+
+    // Save settings
+    $("btn-save-cfg").addEventListener("click", async () => {
+      const res = await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sequencer: $("cfg-seq").value,
+          registry: $("cfg-reg").value,
+          storageApi: $("cfg-storage").value,
+        }),
+      });
+      const data = await res.json();
+      $("cfg-status").className = data.ok ? "msg-ok" : "msg-error";
+      $("cfg-status").textContent = data.ok ? "Saved." : data.error;
+      refreshConfig();
+    });
+
+    refreshConfig();
+  </script>
+</body>
+</html>

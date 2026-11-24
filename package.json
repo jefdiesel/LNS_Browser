@@ -1,0 +1,17 @@
+{
+  "name": "lns-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local web browser and publisher for Logos Names (LNS) + Logos Storage CID sites on LEZ 0.4",
+  "bin": {
+    "lns-browser": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js serve",
+    "test": "node --test test/lns-browser.test.mjs basecamp/logic.test.mjs"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0"
+  }
+}

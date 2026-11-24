@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.DS_Store
+basecamp-module/rust-lib/target/
+basecamp-module/rust-lib/generated/
+basecamp-module/logos-rust-sdk-src/
+*.log
