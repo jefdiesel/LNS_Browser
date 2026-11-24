@@ -443,7 +443,11 @@ export async function resolveName(
   }
 
   const texts = profile.texts ?? {};
-  const cid = isValidCid(texts.cid) ? texts.cid : null;
+  const rawCid =
+    typeof texts.cid === "string"
+      ? texts.cid.trim().replace(/^cid\s*(?:=|:\/\/|:)\s*/i, "")
+      : "";
+  const cid = isValidCid(rawCid) ? rawCid : null;
   const cidSha256 =
     typeof texts["cid.sha256"] === "string" && /^[0-9a-f]{64}$/i.test(texts["cid.sha256"])
       ? texts["cid.sha256"].toLowerCase()

@@ -95,7 +95,11 @@ export function parseUrl(raw) {
 
 export function extractSiteInfo(record) {
   const texts = (record && record.texts) || {};
-  const cid = typeof texts.cid === "string" && CID_RE.test(texts.cid) ? texts.cid : "";
+  const rawCid =
+    typeof texts.cid === "string"
+      ? texts.cid.trim().replace(/^cid\s*(?:=|:\/\/|:)\s*/i, "")
+      : "";
+  const cid = CID_RE.test(rawCid) ? rawCid : "";
   const sha256 =
     typeof texts["cid.sha256"] === "string" && SHA256_RE.test(texts["cid.sha256"])
       ? texts["cid.sha256"].toLowerCase()
