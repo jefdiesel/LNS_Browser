@@ -38,7 +38,10 @@ Item {
     property string basecampPeerId: ""
     property string basecampNetwork: ""
     property var storageInfo: null
-    property string storageApiInput: "" // NEVER defaults to 127.0.0.1:8080 (Logos Blockchain port)
+    property string storageApiInput: ""   // NEVER defaults to 127.0.0.1:8080 (Logos Blockchain port)
+    property string storagePeersInput: "" // One per line: "peerId /ip4/…/tcp/…" (stored locally in ~/.config/lns-browser/config.json)
+    property string peerConnectStatus: ""
+    property var peerConnectQueue: null   // { peers, idx, errors, connected, onDone }
 
     // Active storage_module async download / upload state
     property var activeDownload: null  // { cid, expectedSha256, siteBase, path, chunks, manifestRoot }
@@ -94,6 +97,21 @@ Item {
         }
     }
 
+    Timer {
+        id: peerConnectTimeoutTimer
+        interval: 6000
+        repeat: false
+        onTriggered: {
+            if (root.peerConnectQueue !== null) {
+                var q = root.peerConnectQueue
+                var peer = q.peers[q.idx]
+                q.errors.push("Timed out connecting to storage peer " + Logic.shortHash(peer.peerId, 10, 6))
+                q.idx += 1
+                root.stepPeerConnectQueue()
+            }
+        }
+    }
+
     // Handle incoming `lns.browse` intents and `storage_module` streaming events
     Connections {
         target: root.bridgeReady ? logos : null
@@ -119,10 +137,25 @@ Item {
                     root.basecampStorageRunning = true
                     root.storageBackend = "basecamp"
                     root.readBasecampStorageIdentity()
+                    root.connectStoragePeers(null)
                 } else {
                     root.basecampStorageRunning = false
                     root.problem = "Basecamp Storage module failed to start: " + String(payload.message || "unknown error")
                 }
+                return
+            }
+
+            if (eventName === "storageConnect" && root.peerConnectQueue !== null) {
+                peerConnectTimeoutTimer.stop()
+                var q = root.peerConnectQueue
+                var peer = q.peers[q.idx]
+                if (payload.success) {
+                    q.connected += 1
+                } else {
+                    q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + String(payload.message || "connect failed"))
+                }
+                q.idx += 1
+                root.stepPeerConnectQueue()
                 return
             }
 
@@ -216,20 +249,23 @@ Item {
             problem = "Only https:// external links can be opened."
             return
         }
-        var opened = false
-        try {
-            opened = Qt.openUrlExternally(target)
-        } catch (e) {
-            opened = false
-        }
-        if (opened) {
+        // Launch via lns_browser_core (Basecamp's QML sandbox blocks https:// in Qt.openUrlExternally)
+        callCore("lns_browser_core", "open_external_url", [target], function() {
             pendingExternalUrl = ""
+            problem = ""
             notice = "Opened " + target + " in your browser."
-        } else {
-            // Basecamp's plugin sandbox refuses https:// in Qt.openUrlExternally — copy cleanly instead
-            copyText(target)
-            notice = "Basecamp's sandbox blocks opening external https:// links directly — copied " + target + " to your clipboard so you can paste it into your browser."
-        }
+        }, function(err) {
+            // Fallback: try Qt.openUrlExternally, otherwise copy cleanly to clipboard
+            var opened = false
+            try { opened = Qt.openUrlExternally(target) } catch (e) { opened = false }
+            if (opened) {
+                pendingExternalUrl = ""
+                notice = "Opened " + target + " in your browser."
+            } else {
+                copyText(target)
+                notice = "Could not launch browser (" + err + ") — copied " + target + " to your clipboard."
+            }
+        }, 10000)
     }
 
     function callCore(moduleName, method, args, done, failed, timeoutMs) {
@@ -248,11 +284,24 @@ Item {
         storageBackend = "checking"
         if (bridgeReady && logos.onModuleEvent) {
             logos.onModuleEvent("storage_module", "storageStart")
+            logos.onModuleEvent("storage_module", "storageConnect")
             logos.onModuleEvent("storage_module", "storageDownloadProgress")
             logos.onModuleEvent("storage_module", "storageDownloadDone")
             logos.onModuleEvent("storage_module", "storageUploadProgress")
             logos.onModuleEvent("storage_module", "storageUploadDone")
         }
+        // Load persisted local config (storage_peers + optional external storage_api) first
+        callCore("lns_browser_core", "config_get", [], function(cfg) {
+            if (cfg && typeof cfg.storage_peers_text === "string") {
+                storagePeersInput = cfg.storage_peers_text
+            }
+            probeStorageBackends()
+        }, function() {
+            probeStorageBackends()
+        }, 5000)
+    }
+
+    function probeStorageBackends() {
         // 1. Prefer Basecamp's bundled P2P storage_module when installed
         callCore("storage_module", "isRunning", [], function(running) {
             basecampStorageInstalled = true
@@ -260,6 +309,7 @@ Item {
             storageBackend = "basecamp"
             if (basecampStorageRunning) {
                 readBasecampStorageIdentity()
+                connectStoragePeers(null)
             } else {
                 startBasecampStorage()
             }
@@ -269,6 +319,60 @@ Item {
             basecampStorageRunning = false
             refreshHttpStorageStatus()
         }, 5000)
+    }
+
+    function connectStoragePeers(onDone) {
+        var parsed = Logic.parseStoragePeers(storagePeersInput)
+        if (!parsed.ok) {
+            peerConnectStatus = parsed.errors.join("; ")
+            problem = "Storage peers config error: " + peerConnectStatus
+            if (onDone) onDone(false, peerConnectStatus)
+            return
+        }
+        if (parsed.peers.length === 0 || !basecampStorageRunning) {
+            peerConnectStatus = ""
+            if (onDone) onDone(true, "")
+            return
+        }
+        peerConnectQueue = {
+            peers: parsed.peers,
+            idx: 0,
+            errors: [],
+            connected: 0,
+            onDone: onDone
+        }
+        stepPeerConnectQueue()
+    }
+
+    function stepPeerConnectQueue() {
+        var q = peerConnectQueue
+        if (q === null) return
+        if (q.idx >= q.peers.length) {
+            peerConnectTimeoutTimer.stop()
+            peerConnectQueue = null
+            var errMsg = q.errors.join(" · ")
+            if (q.errors.length > 0 && q.connected === 0) {
+                peerConnectStatus = errMsg
+                problem = errMsg
+            } else if (q.errors.length > 0) {
+                peerConnectStatus = "Connected to " + q.connected + "/" + q.peers.length + " peers (" + errMsg + ")"
+                problem = errMsg
+            } else {
+                peerConnectStatus = "Connected to " + q.connected + " storage peer" + (q.connected === 1 ? "" : "s")
+            }
+            if (q.onDone) q.onDone(q.errors.length === 0 || q.connected > 0, errMsg)
+            return
+        }
+        var peer = q.peers[q.idx]
+        peerConnectTimeoutTimer.restart()
+        callCore("storage_module", "connect", [peer.peerId, peer.addrs], function() {
+            // Wait for asynchronous `storageConnect` event (or 6s timeout)
+        }, function(err) {
+            peerConnectTimeoutTimer.stop()
+            q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + err)
+            q.idx += 1
+            stepPeerConnectQueue()
+        }, 8000)
     }
 
     function startBasecampStorage() {
@@ -549,7 +653,11 @@ Item {
                 startBasecampStorage()
                 return
             }
-            startBasecampDownload(cid, expectedSha256, siteBase, path, null, false)
+            // Workaround for upstream discovery bug (#1556): connect configured peers before download
+            connectStoragePeers(function(_ok, connectErr) {
+                startBasecampDownload(cid, expectedSha256, siteBase, path, null, false)
+                if (connectErr) problem = connectErr
+            })
             return
         }
         if (storageBackend === "http" && storageApiInput.trim() !== "") {
@@ -717,25 +825,33 @@ Item {
             problem = "Port 8080 is used by the Logos Blockchain node, not Logos Storage. Leave blank to use Basecamp's built-in Storage module, or enter your real Logos Storage API port."
             return
         }
-        if (trimmed === "") {
-            callCore("lns_browser_core", "config_set", [JSON.stringify({ storage_api: "" })], function() {}, function() {})
-            if (basecampStorageInstalled) {
-                storageBackend = "basecamp"
-                notice = "Using Basecamp's built-in Logos Storage module."
-            } else {
-                storageBackend = "none"
-                notice = "Cleared external Storage URL."
-            }
-            settingsOpen = false
+        var peersParsed = Logic.parseStoragePeers(storagePeersInput)
+        if (!peersParsed.ok) {
+            problem = "Storage peers invalid: " + peersParsed.errors.join("; ")
             return
         }
-        callCore("lns_browser_core", "config_set", [JSON.stringify({ storage_api: trimmed })], function(v) {
-            storageApiInput = v.storage_api || trimmed
-            storageBackend = "http"
+        var payload = JSON.stringify({
+            storage_api: trimmed,
+            storage_peers_text: peersParsed.peers.map(function(p) { return p.line }).join("\n")
+        })
+        callCore("lns_browser_core", "config_set", [payload], function(v) {
+            storageApiInput = v && v.storage_api ? v.storage_api : ""
+            if (v && typeof v.storage_peers_text === "string") storagePeersInput = v.storage_peers_text
             problem = ""
-            notice = "Saved external Logos Storage API: " + storageApiInput
+            if (storageApiInput === "") {
+                storageBackend = basecampStorageInstalled ? "basecamp" : "none"
+                notice = basecampStorageInstalled
+                    ? "Saved settings (using Basecamp's built-in Logos Storage module)."
+                    : "Saved settings."
+                if (basecampStorageRunning && peersParsed.peers.length > 0) {
+                    connectStoragePeers(null)
+                }
+            } else {
+                storageBackend = "http"
+                notice = "Saved settings (external Storage API: " + storageApiInput + ")."
+                refreshHttpStorageStatus()
+            }
             settingsOpen = false
-            refreshHttpStorageStatus()
         }, function(err) {
             problem = err
         })
@@ -867,19 +983,19 @@ Item {
                         elide: Text.ElideMiddle
                     }
                     Rectangle {
-                        implicitWidth: copyExtTxt.implicitWidth + px(16); height: px(26); radius: px(6); color: root.brass
-                        Text { id: copyExtTxt; anchors.centerIn: parent; text: "Copy Link"; color: root.slate; font.bold: true; font.pixelSize: px(11) }
-                        MouseArea {
-                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                            onClicked: { root.copyText(root.pendingExternalUrl); root.notice = "Copied " + root.pendingExternalUrl + " — paste it into your browser." }
-                        }
-                    }
-                    Rectangle {
-                        implicitWidth: openExtTxt.implicitWidth + px(16); height: px(26); radius: px(6); color: root.raised; border.color: root.line
-                        Text { id: openExtTxt; anchors.centerIn: parent; text: "Open in Browser"; color: root.ink; font.pixelSize: px(11) }
+                        implicitWidth: openExtTxt.implicitWidth + px(16); height: px(26); radius: px(6); color: root.brass
+                        Text { id: openExtTxt; anchors.centerIn: parent; text: "Open in Browser"; color: root.slate; font.bold: true; font.pixelSize: px(11) }
                         MouseArea {
                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                             onClicked: root.openExternalUrl(root.pendingExternalUrl)
+                        }
+                    }
+                    Rectangle {
+                        implicitWidth: copyExtTxt.implicitWidth + px(14); height: px(26); radius: px(6); color: root.raised; border.color: root.line
+                        Text { id: copyExtTxt; anchors.centerIn: parent; text: "Copy Link"; color: root.ink; font.pixelSize: px(11) }
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { root.copyText(root.pendingExternalUrl); root.notice = "Copied " + root.pendingExternalUrl + " — paste it into your browser." }
                         }
                     }
                     Rectangle {
@@ -941,6 +1057,25 @@ Item {
                             Text { id: useBcTxt; anchors.centerIn: parent; text: "Use Basecamp Storage Module"; color: root.ink; font.pixelSize: px(11) }
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.storageApiInput = ""; root.saveSettings() } }
                         }
+                    }
+
+                    Text { text: "Storage peers (one per line: peerId /ip4/…/tcp/… — stored locally, workaround for discovery #1556):"; color: root.dim; font.pixelSize: px(11); wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                    Rectangle {
+                        Layout.fillWidth: true; height: px(76); radius: px(6); color: root.slate; border.color: root.line
+                        Flickable {
+                            anchors.fill: parent; anchors.margins: px(6); contentHeight: peersEdit.implicitHeight; clip: true
+                            TextEdit {
+                                id: peersEdit
+                                width: parent.width
+                                color: root.ink; font.family: root.mono; font.pixelSize: px(11); wrapMode: TextEdit.Wrap
+                                text: root.storagePeersInput; onTextChanged: root.storagePeersInput = text
+                            }
+                        }
+                    }
+                    Text {
+                        visible: root.peerConnectStatus.length > 0
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; color: root.dim; font.family: root.mono; font.pixelSize: px(11)
+                        text: root.peerConnectStatus
                     }
 
                     Text { text: "External Logos Storage REST API URL (optional override — never port 8080):"; color: root.dim; font.pixelSize: px(11) }

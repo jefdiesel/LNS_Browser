@@ -14,6 +14,7 @@ import {
   isPort8080Url,
   isValidName,
   normalizeName,
+  parseStoragePeers,
   parseUrl,
   sanitizeHtmlFallback,
   sha256HexUtf8,
@@ -180,4 +181,15 @@ test("storage_module helpers: sha256, base64, port 8080 check, unreachable CID e
   ]);
   assert.ok(calls.some((c) => c[0] === "scale" && c[1] === 10 && c[2] === 10));
   assert.ok(calls.some((c) => c[0] === "lineTo" && c[1] === 1 && c[2] === 7));
+
+  const peersOk = parseStoragePeers(
+    "# seed peer\n16Uiu2HAm3xPbYz2zsq5XVGDCMqKhhNXZWyYV6WLVv3yzzUiRJWnW /ip4/178.128.140.206/tcp/8070\n\n16Uiu2HAmVFXLh9fs5mExDDwzsah2rWdiHR2Fy3cPmF5xPx29vrbB /ip4/129.212.221.44/tcp/8070 /ip4/129.212.221.44/tcp/8071\n",
+  );
+  assert.equal(peersOk.ok, true);
+  assert.equal(peersOk.peers.length, 2);
+  assert.deepEqual(peersOk.peers[0].addrs, ["/ip4/178.128.140.206/tcp/8070"]);
+  assert.equal(peersOk.peers[1].addrs.length, 2);
+  const peersBad = parseStoragePeers("short /ip4/1.2.3.4/tcp/8070\n16Uiu2HAm3xPbYz2zsq5XVGDCMqKhhNXZWyYV6WLVv3yzzUiRJWnW not-a-multiaddr");
+  assert.equal(peersBad.ok, false);
+  assert.equal(peersBad.errors.length, 2);
 });

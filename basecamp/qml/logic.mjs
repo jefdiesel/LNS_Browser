@@ -48,6 +48,46 @@ export function isPort8080Url(url) {
   return /^https?:\/\/(?:127\.0\.0\.1|localhost):8080(?:\/|$)/i.test(String(url || "").trim());
 }
 
+/**
+ * Parses a multiline "Storage peers" string (one per line: `peerId /ip4/…/tcp/…`).
+ * Blank lines and `#` comments are skipped.
+ */
+export function parseStoragePeers(rawText) {
+  const lines = String(rawText || "").split(/\r?\n/);
+  const peers = [];
+  const errors = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.charAt(0) === "#") continue;
+    const parts = trimmed.split(/\s+/);
+    if (parts.length < 2) {
+      errors.push("Line " + (i + 1) + ": expected `peerId /ip4/…/tcp/…`");
+      continue;
+    }
+    const peerId = parts[0];
+    if (!/^[A-Za-z0-9]{16,128}$/.test(peerId)) {
+      errors.push("Line " + (i + 1) + ": invalid peerId `" + peerId + "`");
+      continue;
+    }
+    const addrs = [];
+    let badAddr = "";
+    for (let j = 1; j < parts.length; j++) {
+      const a = parts[j];
+      if (a.charAt(0) !== "/" || a.length < 4) {
+        badAddr = a;
+        break;
+      }
+      addrs.push(a);
+    }
+    if (badAddr) {
+      errors.push("Line " + (i + 1) + ": invalid address `" + badAddr + "` (expected /ip4/…/tcp/…)");
+      continue;
+    }
+    peers.push({ peerId: peerId, addrs: addrs, line: parts.join(" ") });
+  }
+  return { ok: errors.length === 0, peers: peers, errors: errors };
+}
+
 export function formatUnreachableCidError(cid, detail) {
   const short = shortHash(cid, 12, 8);
   const raw = String(detail || "").trim();

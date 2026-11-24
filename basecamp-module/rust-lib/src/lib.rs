@@ -8,7 +8,9 @@
 mod sanitize;
 mod storage;
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::{json, Value};
 
@@ -38,13 +40,17 @@ pub trait LnsBrowserCoreModule: Send + 'static {
     /// Uploads raw HTML text directly to Logos Storage and returns `{mode, root_cid, sha256, size}`.
     fn publish_html(&mut self, html: String, title: String) -> String;
 
+    /// Opens a strictly validated `https://` URL in the system default web browser.
+    fn open_external_url(&mut self, url: String) -> String;
+
     /// Checks whether the configured local Logos Storage node is reachable.
     fn storage_status(&mut self) -> String;
 
-    /// Returns `{storage_api}`.
+    /// Returns `{storage_api, storage_peers, storage_peers_text}`.
     fn config_get(&mut self) -> String;
 
-    /// Updates `storage_api` (must be `http://127.0.0.1...`, `http://localhost...`, or `https://...`).
+    /// Updates local settings (`storage_api`, `storage_peers` / `storage_peers_text`) and persists
+    /// them to `~/.config/lns-browser/config.json`.
     fn config_set(&mut self, settings_json: String) -> String;
 
     /// Called once the module is wired to the Basecamp host.
@@ -59,14 +65,84 @@ pub struct RustModuleContext;
 
 struct LnsBrowser {
     storage_api: String,
+    storage_peers: Vec<String>,
+    config_path: Option<PathBuf>,
 }
 
 impl Default for LnsBrowser {
     fn default() -> Self {
-        Self {
+        let config_path = default_config_path();
+        let mut me = Self {
             storage_api: DEFAULT_STORAGE_API.to_owned(),
-        }
+            storage_peers: Vec::new(),
+            config_path,
+        };
+        me.load_config_from_disk();
+        me
     }
+}
+
+fn default_config_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".config").join("lns-browser").join("config.json"))
+}
+
+fn is_port_8080_url(url: &str) -> bool {
+    let low = url.trim().to_ascii_lowercase();
+    low.starts_with("http://127.0.0.1:8080")
+        || low.starts_with("https://127.0.0.1:8080")
+        || low.starts_with("http://localhost:8080")
+        || low.starts_with("https://localhost:8080")
+}
+
+fn is_safe_external_https_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.len() < 12 || trimmed.len() > 1024 {
+        return false;
+    }
+    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    if !trimmed.to_ascii_lowercase().starts_with("https://") {
+        return false;
+    }
+    let rest = &trimmed[8..];
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !authority.is_empty() && !authority.contains('@') && authority.contains('.')
+}
+
+fn clean_peer_lines(lines: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (idx, raw) in lines.iter().enumerate() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 2 {
+            return Err(format!(
+                "Storage peers line {} must be `peerId /ip4/…/tcp/…`",
+                idx + 1
+            ));
+        }
+        let peer_id = parts[0];
+        if !(16..=128).contains(&peer_id.len()) || !peer_id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(format!(
+                "Storage peers line {}: invalid peerId `{peer_id}`",
+                idx + 1
+            ));
+        }
+        for addr in &parts[1..] {
+            if !addr.starts_with('/') || addr.chars().any(|c| c.is_control()) {
+                return Err(format!(
+                    "Storage peers line {}: invalid multiaddr `{addr}` (expected /ip4/…/tcp/…)",
+                    idx + 1
+                ));
+            }
+        }
+        out.push(parts.join(" "));
+    }
+    Ok(out)
 }
 
 fn ok(value: Value) -> String {
@@ -137,6 +213,48 @@ fn blocks_to_json(blocks: &[RenderBlock]) -> Vec<Value> {
 impl LnsBrowser {
     fn client(&self) -> StorageClient {
         StorageClient::new(&self.storage_api)
+    }
+
+    fn load_config_from_disk(&mut self) {
+        let Some(ref path) = self.config_path else {
+            return;
+        };
+        let Ok(raw) = fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+            return;
+        };
+        if let Some(api) = val["storage_api"].as_str() {
+            let trimmed = api.trim();
+            if !trimmed.is_empty() && is_allowed_storage_url(trimmed) && !is_port_8080_url(trimmed) {
+                self.storage_api = trimmed.trim_end_matches('/').to_owned();
+            }
+        }
+        if let Some(arr) = val["storage_peers"].as_array() {
+            let lines: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                .collect();
+            if let Ok(clean) = clean_peer_lines(&lines) {
+                self.storage_peers = clean;
+            }
+        }
+    }
+
+    fn save_config_to_disk(&self) -> Result<(), String> {
+        let Some(ref path) = self.config_path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("cannot create config dir: {e}"))?;
+        }
+        let body = serde_json::to_string_pretty(&json!({
+            "storage_api": self.storage_api,
+            "storage_peers": self.storage_peers,
+        }))
+        .map_err(|e| format!("cannot serialize config: {e}"))?;
+        fs::write(path, body + "\n").map_err(|e| format!("cannot write config: {e}"))
     }
 
     fn render_bytes(
@@ -381,12 +499,31 @@ impl LnsBrowserCoreModule for LnsBrowser {
         }
     }
 
+    fn open_external_url(&mut self, url: String) -> String {
+        let trimmed = url.trim().to_owned();
+        if !is_safe_external_https_url(&trimmed) {
+            return err("Only well-formed https:// URLs without credentials can be opened.");
+        }
+        #[cfg(target_os = "macos")]
+        let res = Command::new("/usr/bin/open").arg(&trimmed).spawn();
+        #[cfg(target_os = "linux")]
+        let res = Command::new("xdg-open").arg(&trimmed).spawn();
+        #[cfg(target_os = "windows")]
+        let res = Command::new("cmd").args(["/C", "start", "", &trimmed]).spawn();
+        match res {
+            Ok(_) => ok(json!({ "opened": true, "url": trimmed })),
+            Err(e) => err(format!("Could not launch system browser: {e}")),
+        }
+    }
+
     fn storage_status(&mut self) -> String {
         if self.storage_api.trim().is_empty() {
             return ok(json!({
                 "online": false,
                 "configured": false,
                 "storage_api": "",
+                "storage_peers": self.storage_peers,
+                "storage_peers_text": self.storage_peers.join("\n"),
                 "reason": "No external Logos Storage API URL configured (use Basecamp's built-in Storage module or set one in Settings).",
             }));
         }
@@ -395,6 +532,8 @@ impl LnsBrowserCoreModule for LnsBrowser {
                 "online": true,
                 "configured": true,
                 "storage_api": self.storage_api,
+                "storage_peers": self.storage_peers,
+                "storage_peers_text": self.storage_peers.join("\n"),
                 "peer_id": info["id"],
                 "mock": info["mock"].as_bool().unwrap_or(false) || info["id"].as_str() == Some("16Uiu2HAmLocalLogosStorageSeed"),
             })),
@@ -402,13 +541,19 @@ impl LnsBrowserCoreModule for LnsBrowser {
                 "online": false,
                 "configured": true,
                 "storage_api": self.storage_api,
+                "storage_peers": self.storage_peers,
+                "storage_peers_text": self.storage_peers.join("\n"),
                 "reason": e,
             })),
         }
     }
 
     fn config_get(&mut self) -> String {
-        ok(json!({ "storage_api": self.storage_api }))
+        ok(json!({
+            "storage_api": self.storage_api,
+            "storage_peers": self.storage_peers,
+            "storage_peers_text": self.storage_peers.join("\n"),
+        }))
     }
 
     fn config_set(&mut self, settings_json: String) -> String {
@@ -420,11 +565,33 @@ impl LnsBrowserCoreModule for LnsBrowser {
             if trimmed.is_empty() {
                 self.storage_api.clear();
             } else {
+                if is_port_8080_url(trimmed) {
+                    return err("Port 8080 is used by the Logos Blockchain node, not Logos Storage.");
+                }
                 if !is_allowed_storage_url(trimmed) {
                     return err("storage_api must start with http://127.0.0.1, http://localhost, or https://");
                 }
                 self.storage_api = trimmed.trim_end_matches('/').to_owned();
             }
+        }
+        if let Some(peers_text) = parsed["storage_peers_text"].as_str() {
+            let lines: Vec<String> = peers_text.lines().map(ToOwned::to_owned).collect();
+            match clean_peer_lines(&lines) {
+                Ok(clean) => self.storage_peers = clean,
+                Err(e) => return err(e),
+            }
+        } else if let Some(arr) = parsed["storage_peers"].as_array() {
+            let lines: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                .collect();
+            match clean_peer_lines(&lines) {
+                Ok(clean) => self.storage_peers = clean,
+                Err(e) => return err(e),
+            }
+        }
+        if let Err(e) = self.save_config_to_disk() {
+            return err(e);
         }
         self.config_get()
     }
