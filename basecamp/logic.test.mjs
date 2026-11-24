@@ -7,6 +7,7 @@ import {
   buildPublishDeepLink,
   bytesToBase64,
   bytesToUtf8,
+  drawSvgToCanvas,
   extractSiteInfo,
   formatUnreachableCidError,
   isExternalHttpsUrl,
@@ -140,13 +141,43 @@ test("storage_module helpers: sha256, base64, port 8080 check, unreachable CID e
   const msg = formatUnreachableCidError("z4W2jXDAE4ZM8yrBS1ThzzKkDLRPEiNPxDYBGA5mGPBdPKZ8pYP", "HTTP 404");
   assert.match(msg, /not on any Logos Storage node this browser can reach/i);
   const clean = sanitizeHtmlFallback(
-    `<html><head><style>body{background:#fff;color:#111} a{color:#0055ff} .hero{fill:#0055ff}</style></head><body><h1 class="sr">Hi</h1><svg class="hero" viewBox="0 0 10 10"><rect width="10" height="10"/></svg><p><a href="https://nameswallet.app/browser">Go &rarr;</a></p></body></html>`,
+    `<html><head><style>body{background:#fff;color:#111} a{color:#0055ff} .hero{fill:#0055ff} .shadow{fill:#b8d0ff}</style></head><body><h1 class="sr">Hi</h1><svg class="hero" viewBox="0 0 63 8" aria-label="HELLO WORLD"><defs><path id="px" d="M0 0h1v7h-1z"/></defs><use class="shadow" href="#px" x="0.6" y="0.6"/><use href="#px" x="0" y="0"/></svg><p><a href="https://nameswallet.app/browser">Go &rarr;</a></p></body></html>`,
     "lns://helloworld",
   );
   assert.equal(clean.bg_color, "#ffffff");
   assert.equal(clean.fg_color, "#111111");
   assert.equal(clean.link_color, "#0055ff");
-  assert.equal(clean.blocks.some((b) => b.kind === "image" && b.data_uri.startsWith("data:image/svg+xml;base64,")), true);
+  const svgBlock = clean.blocks.find((b) => b.kind === "svg");
+  assert.ok(svgBlock);
+  assert.equal(svgBlock.ops.length, 2);
+  assert.equal(svgBlock.ops[0].fill, "#b8d0ff");
+  assert.equal(svgBlock.ops[1].fill, "#0055ff");
   assert.match(clean.html, /https:\/\/nameswallet\.app\/browser/);
   assert.match(clean.html, /Go →/);
+
+  // Verify drawSvgToCanvas traces paths and fills both shadow and foreground layers
+  const calls = [];
+  const mockCtx = {
+    globalAlpha: 1,
+    fillStyle: "",
+    clearRect: (...a) => calls.push(["clearRect", ...a]),
+    save: () => calls.push(["save"]),
+    restore: () => calls.push(["restore"]),
+    scale: (...a) => calls.push(["scale", ...a]),
+    translate: (...a) => calls.push(["translate", ...a]),
+    beginPath: () => calls.push(["beginPath"]),
+    moveTo: (...a) => calls.push(["moveTo", ...a]),
+    lineTo: (...a) => calls.push(["lineTo", ...a]),
+    closePath: () => calls.push(["closePath"]),
+    fill: () => calls.push(["fill", mockCtx.fillStyle]),
+    fillRect: (...a) => calls.push(["fillRect", ...a]),
+    arc: (...a) => calls.push(["arc", ...a]),
+  };
+  drawSvgToCanvas(mockCtx, svgBlock, 630, 80);
+  assert.deepEqual(calls.filter((c) => c[0] === "fill"), [
+    ["fill", "#b8d0ff"],
+    ["fill", "#0055ff"],
+  ]);
+  assert.ok(calls.some((c) => c[0] === "scale" && c[1] === 10 && c[2] === 10));
+  assert.ok(calls.some((c) => c[0] === "lineTo" && c[1] === 1 && c[2] === 7));
 });

@@ -401,6 +401,7 @@ export function sanitizeHtmlFallback(rawHtml, siteBase) {
   let fgColor = "";
   let linkColor = "";
   let svgFill = "";
+  const classFills = {};
   const styleRe = /<style[^>]*>([\s\S]*?)<\/style>/gi;
   let sm;
   while ((sm = styleRe.exec(src)) !== null) {
@@ -417,10 +418,15 @@ export function sanitizeHtmlFallback(rawHtml, siteBase) {
       const lcM = aM[1].match(/(?:^|;)\s*color\s*:\s*([^;]+)/i);
       if (lcM) linkColor = safeHexColor(lcM[1]) || linkColor;
     }
-    const heroM = css.match(/\.hero\s*\{([^}]*)\}/i);
-    if (heroM) {
-      const fM = heroM[1].match(/(?:fill|color)\s*:\s*([^;]+)/i);
-      if (fM) svgFill = safeHexColor(fM[1]) || svgFill;
+    const clsRe = /\.([a-zA-Z0-9_-]+)\s*\{([^}]*)\}/g;
+    let cm;
+    while ((cm = clsRe.exec(css)) !== null) {
+      const fM = cm[2].match(/(?:fill|color)\s*:\s*([^;]+)/i);
+      const col = fM ? safeHexColor(fM[1]) : "";
+      if (col) {
+        classFills[cm[1].toLowerCase()] = col;
+        if (cm[1].toLowerCase() === "hero") svgFill = col;
+      }
     }
   }
 
@@ -485,28 +491,33 @@ export function sanitizeHtmlFallback(rawHtml, siteBase) {
       lowSvg.indexOf("https://") === -1 &&
       !/\son[a-z]+\s*=/i.test(lowSvg);
     if (safeSvg) {
-      let cleanSvg = rawSvg;
-      const gt = cleanSvg.indexOf(">");
-      if (gt !== -1) {
-        let extra = "";
-        const headLow = cleanSvg.slice(0, gt).toLowerCase();
-        if (headLow.indexOf("xmlns=") === -1) extra += ' xmlns="http://www.w3.org/2000/svg"';
-        if (headLow.indexOf("fill=") === -1 && (svgFill || linkColor)) {
-          extra += ' fill="' + (svgFill || linkColor) + '"';
-        }
-        if (extra) cleanSvg = cleanSvg.slice(0, gt) + extra + cleanSvg.slice(gt);
-      }
-      const vb = cleanSvg.match(/viewBox\s*=\s*["']\s*[\d.-]+[\s,]+[\d.-]+[\s,]+([\d.]+)[\s,]+([\d.]+)/i);
-      const vbW = vb ? Math.ceil(Number(vb[1])) : 600;
-      const vbH = vb ? Math.ceil(Number(vb[2])) : 120;
-      const w = vbW < 120 ? Math.min(760, vbW * 10) : Math.min(760, vbW);
+      const vb = rawSvg.match(/viewBox\s*=\s*["']\s*([\d.-]+)[\s,]+([\d.-]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i);
+      const vbX = vb ? Number(vb[1]) : 0;
+      const vbY = vb ? Number(vb[2]) : 0;
+      const vbW = vb && Number(vb[3]) > 0 ? Number(vb[3]) : 600;
+      const vbH = vb && Number(vb[4]) > 0 ? Number(vb[4]) : 120;
+      const w = vbW < 120 ? Math.min(760, Math.ceil(vbW * 10)) : Math.min(760, Math.ceil(vbW));
       const h = vbW > 0 ? Math.max(24, Math.round((w * vbH) / vbW)) : 120;
-      blocks.push({
-        kind: "image",
-        data_uri: "data:image/svg+xml;base64," + bytesToBase64(utf8ToBytes(cleanSvg)),
-        width: w,
-        height: h,
-      });
+      const fillMatch = rawSvg.slice(0, rawSvg.indexOf(">")).match(/\bfill\s*=\s*["']([^"']+)["']/i);
+      const defaultFill = (fillMatch && safeHexColor(fillMatch[1])) || svgFill || linkColor || fgColor || "#0055ff";
+      const altMatch = rawSvg.slice(0, rawSvg.indexOf(">")).match(/aria-label\s*=\s*["']([^"']+)["']/i);
+      const alt = altMatch ? decodeHtmlEntities(altMatch[1]) : "";
+      const ops = extractSvgCanvasOps(rawSvg, defaultFill, classFills);
+      if (ops.length > 0) {
+        blocks.push({
+          kind: "svg",
+          alt: alt,
+          vb_x: vbX,
+          vb_y: vbY,
+          vb_w: vbW,
+          vb_h: vbH,
+          width: w,
+          height: h,
+          ops: ops,
+        });
+      } else if (alt) {
+        blocks.push({ kind: "html", html: "<h2>" + escapeHtml(alt) + "</h2>" });
+      }
     }
     lastIdx = m.index + rawSvg.length;
   }
@@ -522,6 +533,215 @@ export function sanitizeHtmlFallback(rawHtml, siteBase) {
     link_color: linkColor || null,
     blocks: blocks,
   };
+}
+
+function getSvgAttr(attrs, name) {
+  const re = new RegExp("(?:^|\\s)" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')", "i");
+  const m = String(attrs || "").match(re);
+  return m ? (m[1] !== undefined ? m[1] : m[2]) : "";
+}
+
+function resolveSvgElemFill(attrs, defaultFill, classFills) {
+  const rawFill = getSvgAttr(attrs, "fill");
+  if (rawFill) {
+    const low = rawFill.trim().toLowerCase();
+    if (low === "none" || low === "transparent") return "";
+    if (low === "currentcolor") return defaultFill;
+    const c = safeHexColor(rawFill);
+    if (c) return c;
+  }
+  const clsAttr = getSvgAttr(attrs, "class");
+  if (clsAttr && classFills) {
+    const parts = clsAttr.trim().split(/\s+/);
+    for (let i = 0; i < parts.length; i++) {
+      const c = classFills[parts[i].toLowerCase()];
+      if (c) return c;
+    }
+  }
+  return defaultFill;
+}
+
+export function extractSvgCanvasOps(rawSvg, defaultFill, classFills) {
+  const defs = {};
+  const ops = [];
+  let inDefs = false;
+  const tagRe = /<(\/?)([a-zA-Z0-9:_-]+)([^>]*)>/g;
+  let m;
+  while ((m = tagRe.exec(String(rawSvg || ""))) !== null && ops.length < 512) {
+    const isClose = m[1] === "/";
+    const tag = m[2].toLowerCase();
+    const attrs = m[3] || "";
+    if (tag === "defs") {
+      inDefs = !isClose;
+      continue;
+    }
+    if (isClose) continue;
+    const opRaw = getSvgAttr(attrs, "opacity") || getSvgAttr(attrs, "fill-opacity");
+    const opacity = opRaw !== "" && !isNaN(Number(opRaw)) ? Math.max(0, Math.min(1, Number(opRaw))) : 1;
+
+    if (tag === "path") {
+      const d = getSvgAttr(attrs, "d");
+      if (!d) continue;
+      const id = getSvgAttr(attrs, "id");
+      if (id) defs[id.trim()] = d;
+      if (inDefs) continue;
+      const fill = resolveSvgElemFill(attrs, defaultFill, classFills);
+      if (!fill) continue;
+      ops.push({ op: "path", d: d, x: 0, y: 0, fill: fill, opacity: opacity });
+    } else if (tag === "use" && !inDefs) {
+      const href = (getSvgAttr(attrs, "href") || getSvgAttr(attrs, "xlink:href") || "").trim().replace(/^#/, "");
+      const d = defs[href];
+      if (!d) continue;
+      const fill = resolveSvgElemFill(attrs, defaultFill, classFills);
+      if (!fill) continue;
+      const x = Number(getSvgAttr(attrs, "x") || 0) || 0;
+      const y = Number(getSvgAttr(attrs, "y") || 0) || 0;
+      ops.push({ op: "path", d: d, x: x, y: y, fill: fill, opacity: opacity });
+    } else if (tag === "rect" && !inDefs) {
+      const fill = resolveSvgElemFill(attrs, defaultFill, classFills);
+      if (!fill) continue;
+      const x = Number(getSvgAttr(attrs, "x") || 0) || 0;
+      const y = Number(getSvgAttr(attrs, "y") || 0) || 0;
+      const w = Number(String(getSvgAttr(attrs, "width") || "").replace(/px$/i, ""));
+      const h = Number(String(getSvgAttr(attrs, "height") || "").replace(/px$/i, ""));
+      if (w > 0 && h > 0) ops.push({ op: "rect", x: x, y: y, w: w, h: h, fill: fill, opacity: opacity });
+    } else if (tag === "circle" && !inDefs) {
+      const fill = resolveSvgElemFill(attrs, defaultFill, classFills);
+      if (!fill) continue;
+      const cx = Number(getSvgAttr(attrs, "cx") || 0) || 0;
+      const cy = Number(getSvgAttr(attrs, "cy") || 0) || 0;
+      const r = Number(getSvgAttr(attrs, "r") || 0);
+      if (r > 0) ops.push({ op: "circle", x: cx, y: cy, r: r, fill: fill, opacity: opacity });
+    } else if (tag === "polygon" && !inDefs) {
+      const fill = resolveSvgElemFill(attrs, defaultFill, classFills);
+      const pts = getSvgAttr(attrs, "points");
+      if (fill && pts) ops.push({ op: "polygon", points: pts, x: 0, y: 0, fill: fill, opacity: opacity });
+    }
+  }
+  return ops;
+}
+
+// Draws a sanitized `kind: "svg"` block onto a QtQuick Canvas 2D context (zero QtSvg dependency).
+export function drawSvgToCanvas(ctx, block, canvasW, canvasH) {
+  if (!ctx || !block || !Array.isArray(block.ops) || canvasW <= 0 || canvasH <= 0) return;
+  const vbX = Number(block.vb_x || 0) || 0;
+  const vbY = Number(block.vb_y || 0) || 0;
+  const vbW = Number(block.vb_w || 0) > 0 ? Number(block.vb_w) : 100;
+  const vbH = Number(block.vb_h || 0) > 0 ? Number(block.vb_h) : 100;
+
+  ctx.clearRect(0, 0, canvasW, canvasH);
+  ctx.save();
+  ctx.scale(canvasW / vbW, canvasH / vbH);
+  if (vbX !== 0 || vbY !== 0) ctx.translate(-vbX, -vbY);
+
+  for (let i = 0; i < block.ops.length; i++) {
+    const item = block.ops[i];
+    if (!item || !item.fill) continue;
+    ctx.save();
+    ctx.globalAlpha = typeof item.opacity === "number" ? item.opacity : 1;
+    ctx.fillStyle = item.fill;
+
+    if (item.op === "rect") {
+      ctx.fillRect(item.x || 0, item.y || 0, item.w || 0, item.h || 0);
+    } else if (item.op === "circle") {
+      ctx.beginPath();
+      ctx.arc(item.x || 0, item.y || 0, item.r || 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (item.op === "polygon" && item.points) {
+      const nums = String(item.points).match(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi) || [];
+      if (nums.length >= 4) {
+        ctx.beginPath();
+        ctx.moveTo(Number(nums[0]), Number(nums[1]));
+        for (let p = 2; p + 1 < nums.length; p += 2) {
+          ctx.lineTo(Number(nums[p]), Number(nums[p + 1]));
+        }
+        ctx.closePath();
+        ctx.fill();
+      }
+    } else if (item.op === "path" && item.d) {
+      if (item.x || item.y) ctx.translate(item.x || 0, item.y || 0);
+      traceSvgPath(ctx, item.d);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function traceSvgPath(ctx, d) {
+  const tokens = String(d || "").match(/[a-zA-Z]|-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi) || [];
+  let i = 0;
+  let cmd = "";
+  let cx = 0;
+  let cy = 0;
+  let sx = 0;
+  let sy = 0;
+  ctx.beginPath();
+
+  function isCmd(tok) {
+    return tok && tok.length === 1 && /[a-zA-Z]/.test(tok);
+  }
+  function nextNum() {
+    return i < tokens.length ? Number(tokens[i++]) : 0;
+  }
+
+  while (i < tokens.length) {
+    if (isCmd(tokens[i])) {
+      cmd = tokens[i++];
+    } else if (!cmd) {
+      break;
+    }
+    if (cmd === "M" || cmd === "m") {
+      const nx = nextNum();
+      const ny = nextNum();
+      cx = cmd === "m" ? cx + nx : nx;
+      cy = cmd === "m" ? cy + ny : ny;
+      sx = cx;
+      sy = cy;
+      ctx.moveTo(cx, cy);
+      cmd = cmd === "m" ? "l" : "L";
+    } else if (cmd === "L" || cmd === "l") {
+      const nx = nextNum();
+      const ny = nextNum();
+      cx = cmd === "l" ? cx + nx : nx;
+      cy = cmd === "l" ? cy + ny : ny;
+      ctx.lineTo(cx, cy);
+    } else if (cmd === "H" || cmd === "h") {
+      const nx = nextNum();
+      cx = cmd === "h" ? cx + nx : nx;
+      ctx.lineTo(cx, cy);
+    } else if (cmd === "V" || cmd === "v") {
+      const ny = nextNum();
+      cy = cmd === "v" ? cy + ny : ny;
+      ctx.lineTo(cx, cy);
+    } else if (cmd === "C" || cmd === "c") {
+      const x1 = nextNum(), y1 = nextNum(), x2 = nextNum(), y2 = nextNum(), x = nextNum(), y = nextNum();
+      if (cmd === "c") {
+        ctx.bezierCurveTo(cx + x1, cy + y1, cx + x2, cy + y2, cx + x, cy + y);
+        cx += x; cy += y;
+      } else {
+        ctx.bezierCurveTo(x1, y1, x2, y2, x, y);
+        cx = x; cy = y;
+      }
+    } else if (cmd === "Q" || cmd === "q") {
+      const x1 = nextNum(), y1 = nextNum(), x = nextNum(), y = nextNum();
+      if (cmd === "q") {
+        ctx.quadraticCurveTo(cx + x1, cy + y1, cx + x, cy + y);
+        cx += x; cy += y;
+      } else {
+        ctx.quadraticCurveTo(x1, y1, x, y);
+        cx = x; cy = y;
+      }
+    } else if (cmd === "Z" || cmd === "z") {
+      ctx.closePath();
+      cx = sx;
+      cy = sy;
+      cmd = "";
+    } else {
+      // Skip unsupported command token gracefully
+      cmd = "";
+    }
+  }
 }
 
 export function buildPublishDeepLink(params) {

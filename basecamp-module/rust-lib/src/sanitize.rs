@@ -37,17 +37,36 @@ const STRIP_CONTENT: [&str; 10] = [
     "head",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SvgOp {
+    pub op: String, // "path" | "rect" | "circle" | "polygon"
+    pub d: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub w: Option<f64>,
+    pub h: Option<f64>,
+    pub r: Option<f64>,
+    pub points: Option<String>,
+    pub fill: String,
+    pub opacity: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderBlock {
-    pub kind: String, // "html" | "image"
+    pub kind: String, // "html" | "svg" | "image"
     pub html: Option<String>,
     pub data_uri: Option<String>,
     pub alt: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub vb_x: Option<f64>,
+    pub vb_y: Option<f64>,
+    pub vb_w: Option<f64>,
+    pub vb_h: Option<f64>,
+    pub ops: Vec<SvgOp>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Sanitized {
     pub html: String,
     pub title: Option<String>,
@@ -320,6 +339,11 @@ pub fn sanitize_html(source: &str, site_base: &str, current_path: &str) -> Sanit
             alt: None,
             width: None,
             height: None,
+            vb_x: None,
+            vb_y: None,
+            vb_w: None,
+            vb_h: None,
+            ops: Vec::new(),
         });
     }
 
@@ -448,6 +472,11 @@ pub fn markdown_to_safe_html(source: &str, site_base: &str, current_path: &str) 
             alt: None,
             width: None,
             height: None,
+            vb_x: None,
+            vb_y: None,
+            vb_w: None,
+            vb_h: None,
+            ops: Vec::new(),
         }]
     };
     Sanitized {
@@ -544,6 +573,11 @@ fn flush_html_block(out: &mut String, open: &mut Vec<&'static str>, blocks: &mut
         alt: None,
         width: None,
         height: None,
+        vb_x: None,
+        vb_y: None,
+        vb_w: None,
+        vb_h: None,
+        ops: Vec::new(),
     });
     // Re-open surrounding container tags for the next HTML chunk
     for tag in saved {
@@ -730,6 +764,11 @@ fn sanitize_css_prop(key: &str, val: &str) -> Option<(&'static str, String)> {
     match key {
         "color" => sanitize_color(val).map(|c| ("color", c)),
         "fill" => sanitize_color(val).map(|c| ("fill", c)),
+        "opacity" | "fill-opacity" => val
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|n| ("opacity", format!("{}", n.clamp(0.0, 1.0)))),
         "background" | "background-color" => sanitize_color(val).map(|c| ("background-color", c)),
         "font-weight" => {
             let l = val.to_ascii_lowercase();
@@ -961,32 +1000,64 @@ fn sanitize_svg_block(raw_svg: &str, attrs: &str, sheet: &StyleSheet) -> Option<
         resolved_fill = sheet.fg_color.clone();
     }
 
-    // Parse viewBox or width/height so QML can size cleanly
-    let (vb_w, vb_h) = extract_attr(attrs, "viewBox")
-        .and_then(|vb| parse_viewbox(&vb))
-        .unwrap_or((600, 120));
+    // Parse viewBox or width/height so QML Canvas can size cleanly
+    let (vb_x, vb_y, vb_w, vb_h) = extract_attr(attrs, "viewBox")
+        .and_then(|vb| parse_viewbox_full(&vb))
+        .unwrap_or((0.0, 0.0, 600.0, 120.0));
     let width = extract_attr(attrs, "width")
         .and_then(|v| parse_px_u32(&v))
         .unwrap_or_else(|| {
-            if vb_w < 120 {
-                (vb_w * 10).min(760)
+            if vb_w < 120.0 {
+                ((vb_w * 10.0).ceil() as u32).min(760)
             } else {
-                vb_w.min(760)
+                (vb_w.ceil() as u32).min(760)
             }
         });
     let height = extract_attr(attrs, "height")
         .and_then(|v| parse_px_u32(&v))
         .unwrap_or_else(|| {
-            if vb_w > 0 {
-                ((width as u64 * vb_h as u64) / vb_w as u64).max(24) as u32
+            if vb_w > 0.0 {
+                (((width as f64) * vb_h / vb_w).round() as u32).max(24)
             } else {
                 120
             }
         });
 
     let alt = extract_attr(attrs, "aria-label").map(|a| decode_entities(&a));
+    let default_fill = resolved_fill
+        .clone()
+        .or_else(|| sheet.link_color.clone())
+        .or_else(|| sheet.fg_color.clone())
+        .unwrap_or_else(|| "#0055ff".to_owned());
 
-    // Patch <svg ...> opening tag to ensure xmlns and resolved fill/dimensions
+    // Extract safe geometric Canvas draw ops (works natively in QtQuick Canvas with zero QtSvg dependency)
+    let ops = extract_svg_canvas_ops(raw_svg, &default_fill, sheet);
+    if ops.is_empty() {
+        // Fallback: if no drawable primitives were found, render aria-label text if present
+        if let Some(ref label) = alt {
+            if !label.trim().is_empty() {
+                let mut h = String::from("<h2>");
+                push_escaped(&mut h, label.trim());
+                h.push_str("</h2>");
+                return Some(RenderBlock {
+                    kind: "html".to_owned(),
+                    html: Some(h),
+                    data_uri: None,
+                    alt,
+                    width: None,
+                    height: None,
+                    vb_x: None,
+                    vb_y: None,
+                    vb_w: None,
+                    vb_h: None,
+                    ops: Vec::new(),
+                });
+            }
+        }
+        return None;
+    }
+
+    // Patch <svg ...> opening tag for optional data_uri fallback
     let mut clean_svg = raw_svg.to_owned();
     if let Some(first_gt) = clean_svg.find('>') {
         let mut extra = String::new();
@@ -995,9 +1066,7 @@ fn sanitize_svg_block(raw_svg: &str, attrs: &str, sheet: &StyleSheet) -> Option<
             extra.push_str(r#" xmlns="http://www.w3.org/2000/svg""#);
         }
         if !open_lower.contains("fill=") {
-            if let Some(ref c) = resolved_fill {
-                extra.push_str(&format!(r#" fill="{c}""#));
-            }
+            extra.push_str(&format!(r#" fill="{default_fill}""#));
         }
         if !open_lower.contains("width=") {
             extra.push_str(&format!(r#" width="{width}""#));
@@ -1009,21 +1078,297 @@ fn sanitize_svg_block(raw_svg: &str, attrs: &str, sheet: &StyleSheet) -> Option<
             clean_svg.insert_str(first_gt, &extra);
         }
     }
-    if let Some(ref c) = resolved_fill {
-        clean_svg = clean_svg
-            .replace("currentColor", c)
-            .replace("currentcolor", c);
-    }
+    clean_svg = clean_svg
+        .replace("currentColor", &default_fill)
+        .replace("currentcolor", &default_fill);
 
     let b64 = base64_encode(clean_svg.as_bytes());
     Some(RenderBlock {
-        kind: "image".to_owned(),
+        kind: "svg".to_owned(),
         html: None,
         data_uri: Some(format!("data:image/svg+xml;base64,{b64}")),
         alt,
         width: Some(width),
         height: Some(height),
+        vb_x: Some(vb_x),
+        vb_y: Some(vb_y),
+        vb_w: Some(vb_w),
+        vb_h: Some(vb_h),
+        ops,
     })
+}
+
+fn resolve_elem_fill(attrs: &str, default_fill: &str, sheet: &StyleSheet) -> Option<String> {
+    if let Some(f) = extract_attr(attrs, "fill") {
+        let low = f.trim().to_ascii_lowercase();
+        if low == "none" || low == "transparent" {
+            return None;
+        }
+        if low == "currentcolor" {
+            return Some(default_fill.to_owned());
+        }
+        if let Some(c) = sanitize_color(&f) {
+            return Some(c);
+        }
+    }
+    if let Some(st) = extract_attr(attrs, "style") {
+        for (k, v) in parse_css_declarations(&st) {
+            if k == "fill" {
+                let low = v.trim().to_ascii_lowercase();
+                if low == "none" || low == "transparent" {
+                    return None;
+                }
+                if let Some(c) = sanitize_color(&v) {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    if let Some(cls_attr) = extract_attr(attrs, "class") {
+        for cls in cls_attr.split_whitespace() {
+            if let Some(cls_map) = sheet.class_styles.get(&cls.to_ascii_lowercase()) {
+                if let Some(c) = cls_map.get("fill").or_else(|| cls_map.get("color")) {
+                    return Some(c.clone());
+                }
+            }
+        }
+    }
+    Some(default_fill.to_owned())
+}
+
+fn resolve_elem_opacity(attrs: &str, sheet: &StyleSheet) -> f64 {
+    for key in ["opacity", "fill-opacity"] {
+        if let Some(v) = extract_attr(attrs, key) {
+            if let Ok(n) = v.trim().parse::<f64>() {
+                return n.clamp(0.0, 1.0);
+            }
+        }
+    }
+    if let Some(st) = extract_attr(attrs, "style") {
+        for (k, v) in parse_css_declarations(&st) {
+            if k == "opacity" || k == "fill-opacity" {
+                if let Ok(n) = v.trim().parse::<f64>() {
+                    return n.clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
+    if let Some(cls_attr) = extract_attr(attrs, "class") {
+        for cls in cls_attr.split_whitespace() {
+            if let Some(cls_map) = sheet.class_styles.get(&cls.to_ascii_lowercase()) {
+                if let Some(v) = cls_map.get("opacity") {
+                    if let Ok(n) = v.parse::<f64>() {
+                        return n.clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+    }
+    1.0
+}
+
+fn parse_translate(transform: &str) -> (f64, f64) {
+    let low = transform.to_ascii_lowercase();
+    let Some(pos) = low.find("translate(") else {
+        return (0.0, 0.0);
+    };
+    let after = &transform[pos + 10..];
+    let Some(end) = after.find(')') else {
+        return (0.0, 0.0);
+    };
+    let nums: Vec<f64> = after[..end]
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<f64>().ok())
+        .collect();
+    match nums.len() {
+        0 => (0.0, 0.0),
+        1 => (nums[0], 0.0),
+        _ => (nums[0], nums[1]),
+    }
+}
+
+fn extract_svg_canvas_ops(raw_svg: &str, default_fill: &str, sheet: &StyleSheet) -> Vec<SvgOp> {
+    let mut defs: HashMap<String, String> = HashMap::new();
+    let mut ops: Vec<SvgOp> = Vec::new();
+    let bytes = raw_svg.as_bytes();
+    let mut in_defs = false;
+    let mut i = 0;
+
+    while i < bytes.len() && ops.len() < 512 {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let Some(gt) = find_tag_end(bytes, i + 1) else {
+            break;
+        };
+        let tag_body = raw_svg[i + 1..gt].trim();
+        i = gt + 1;
+        if tag_body.is_empty() || tag_body.starts_with('!') || tag_body.starts_with('?') {
+            continue;
+        }
+        let is_close = tag_body.starts_with('/');
+        let rest = if is_close {
+            tag_body[1..].trim_start()
+        } else {
+            tag_body.trim_end_matches('/').trim()
+        };
+        let name_end = rest
+            .find(|c: char| c.is_ascii_whitespace() || c == '/')
+            .unwrap_or(rest.len());
+        let tag = rest[..name_end].to_ascii_lowercase();
+        let attrs = &rest[name_end..];
+
+        if tag == "defs" {
+            in_defs = !is_close;
+            continue;
+        }
+        if is_close {
+            continue;
+        }
+
+        if tag == "path" {
+            let Some(d) = extract_attr(attrs, "d") else {
+                continue;
+            };
+            if let Some(id) = extract_attr(attrs, "id") {
+                defs.insert(id.trim().to_owned(), d.clone());
+            }
+            if in_defs {
+                continue;
+            }
+            let Some(fill) = resolve_elem_fill(attrs, default_fill, sheet) else {
+                continue;
+            };
+            let (tx, ty) = extract_attr(attrs, "transform")
+                .map(|t| parse_translate(&t))
+                .unwrap_or((0.0, 0.0));
+            ops.push(SvgOp {
+                op: "path".to_owned(),
+                d: Some(d),
+                x: tx,
+                y: ty,
+                w: None,
+                h: None,
+                r: None,
+                points: None,
+                fill,
+                opacity: resolve_elem_opacity(attrs, sheet),
+            });
+        } else if tag == "use" && !in_defs {
+            let href = extract_attr(attrs, "href")
+                .or_else(|| extract_attr(attrs, "xlink:href"))
+                .unwrap_or_default();
+            let id = href.trim().trim_start_matches('#');
+            let Some(d) = defs.get(id).cloned() else {
+                continue;
+            };
+            let Some(fill) = resolve_elem_fill(attrs, default_fill, sheet) else {
+                continue;
+            };
+            let x = extract_attr(attrs, "x")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let y = extract_attr(attrs, "y")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let (tx, ty) = extract_attr(attrs, "transform")
+                .map(|t| parse_translate(&t))
+                .unwrap_or((0.0, 0.0));
+            ops.push(SvgOp {
+                op: "path".to_owned(),
+                d: Some(d),
+                x: x + tx,
+                y: y + ty,
+                w: None,
+                h: None,
+                r: None,
+                points: None,
+                fill,
+                opacity: resolve_elem_opacity(attrs, sheet),
+            });
+        } else if tag == "rect" && !in_defs {
+            let Some(fill) = resolve_elem_fill(attrs, default_fill, sheet) else {
+                continue;
+            };
+            let x = extract_attr(attrs, "x")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let y = extract_attr(attrs, "y")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let Some(w) = extract_attr(attrs, "width").and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok()) else {
+                continue;
+            };
+            let Some(h) = extract_attr(attrs, "height").and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok()) else {
+                continue;
+            };
+            if w > 0.0 && h > 0.0 {
+                ops.push(SvgOp {
+                    op: "rect".to_owned(),
+                    d: None,
+                    x,
+                    y,
+                    w: Some(w),
+                    h: Some(h),
+                    r: None,
+                    points: None,
+                    fill,
+                    opacity: resolve_elem_opacity(attrs, sheet),
+                });
+            }
+        } else if tag == "circle" && !in_defs {
+            let Some(fill) = resolve_elem_fill(attrs, default_fill, sheet) else {
+                continue;
+            };
+            let cx = extract_attr(attrs, "cx")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let cy = extract_attr(attrs, "cy")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let Some(r) = extract_attr(attrs, "r").and_then(|v| v.trim().parse::<f64>().ok()) else {
+                continue;
+            };
+            if r > 0.0 {
+                ops.push(SvgOp {
+                    op: "circle".to_owned(),
+                    d: None,
+                    x: cx,
+                    y: cy,
+                    w: None,
+                    h: None,
+                    r: Some(r),
+                    points: None,
+                    fill,
+                    opacity: resolve_elem_opacity(attrs, sheet),
+                });
+            }
+        } else if tag == "polygon" && !in_defs {
+            let Some(fill) = resolve_elem_fill(attrs, default_fill, sheet) else {
+                continue;
+            };
+            let Some(pts) = extract_attr(attrs, "points") else {
+                continue;
+            };
+            if !pts.trim().is_empty() {
+                ops.push(SvgOp {
+                    op: "polygon".to_owned(),
+                    d: None,
+                    x: 0.0,
+                    y: 0.0,
+                    w: None,
+                    h: None,
+                    r: None,
+                    points: Some(pts),
+                    fill,
+                    opacity: resolve_elem_opacity(attrs, sheet),
+                });
+            }
+        }
+    }
+    ops
 }
 
 fn sanitize_data_img(attrs: &str) -> Option<RenderBlock> {
@@ -1058,6 +1403,11 @@ fn sanitize_data_img(attrs: &str) -> Option<RenderBlock> {
         alt,
         width,
         height,
+        vb_x: None,
+        vb_y: None,
+        vb_w: None,
+        vb_h: None,
+        ops: Vec::new(),
     })
 }
 
@@ -1082,14 +1432,14 @@ fn contains_event_handler(lower: &str) -> bool {
     false
 }
 
-fn parse_viewbox(vb: &str) -> Option<(u32, u32)> {
-    let nums: Vec<f32> = vb
+fn parse_viewbox_full(vb: &str) -> Option<(f64, f64, f64, f64)> {
+    let nums: Vec<f64> = vb
         .split(|c: char| c.is_ascii_whitespace() || c == ',')
         .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<f32>().ok())
+        .filter_map(|s| s.parse::<f64>().ok())
         .collect();
     if nums.len() == 4 && nums[2] > 0.0 && nums[3] > 0.0 {
-        Some((nums[2].ceil() as u32, nums[3].ceil() as u32))
+        Some((nums[0], nums[1], nums[2], nums[3]))
     } else {
         None
     }
@@ -1368,16 +1718,21 @@ mod tests {
     }
 
     #[test]
-    fn renders_safe_inline_svg_as_image_block_and_rejects_malicious_svg() {
+    fn renders_safe_inline_svg_as_canvas_ops_and_rejects_malicious_svg() {
         let html = r##"
             <html><head><style>
               body { background: #ffffff; color: #18202c; }
               .sr { position: absolute; clip: rect(0,0,0,0); }
               .hero { fill: #0055ff; }
+              .shadow { fill: #b8d0ff; }
             </style></head>
             <body>
               <h1 class="sr">Hello World</h1>
-              <svg class="hero" viewBox="0 0 63 8" aria-label="HELLO WORLD"><path d="M0 0h1v7h-1z"/></svg>
+              <svg class="hero" viewBox="0 0 63 8" aria-label="HELLO WORLD">
+                <defs><path id="px" d="M0 0h1v7h-1z"/></defs>
+                <use class="shadow" href="#px" x="0.6" y="0.6"/>
+                <use href="#px" x="0" y="0"/>
+              </svg>
               <svg><script>alert(1)</script><rect width="10" height="10"/></svg>
               <svg onclick="alert(1)"><rect width="10" height="10"/></svg>
               <p>Body text</p>
@@ -1386,11 +1741,16 @@ mod tests {
         let s = sanitize_html(html, "lns://helloworld", "/");
         assert_eq!(s.bg_color.as_deref(), Some("#ffffff"));
         assert_eq!(s.fg_color.as_deref(), Some("#18202c"));
-        let imgs: Vec<&RenderBlock> = s.blocks.iter().filter(|b| b.kind == "image").collect();
-        assert_eq!(imgs.len(), 1);
-        assert_eq!(imgs[0].alt.as_deref(), Some("HELLO WORLD"));
-        let uri = imgs[0].data_uri.as_deref().unwrap();
-        assert!(uri.starts_with("data:image/svg+xml;base64,"));
+        let svgs: Vec<&RenderBlock> = s.blocks.iter().filter(|b| b.kind == "svg").collect();
+        assert_eq!(svgs.len(), 1);
+        assert_eq!(svgs[0].alt.as_deref(), Some("HELLO WORLD"));
+        assert_eq!(svgs[0].vb_w, Some(63.0));
+        assert_eq!(svgs[0].vb_h, Some(8.0));
+        assert_eq!(svgs[0].ops.len(), 2);
+        assert_eq!(svgs[0].ops[0].fill, "#b8d0ff");
+        assert_eq!(svgs[0].ops[0].x, 0.6);
+        assert_eq!(svgs[0].ops[1].fill, "#0055ff");
+        assert_eq!(svgs[0].ops[1].d.as_deref(), Some("M0 0h1v7h-1z"));
         // Screen-reader-only h1 hidden because hero SVG rendered
         assert!(!s.html.contains("<h1>Hello World</h1>"));
         assert!(s.html.contains("<p>Body text</p>"));

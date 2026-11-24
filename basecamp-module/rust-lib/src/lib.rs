@@ -99,6 +99,24 @@ fn blocks_to_json(blocks: &[RenderBlock]) -> Vec<Value> {
     blocks
         .iter()
         .map(|b| {
+            let ops: Vec<Value> = b
+                .ops
+                .iter()
+                .map(|op| {
+                    json!({
+                        "op": op.op,
+                        "d": op.d,
+                        "x": op.x,
+                        "y": op.y,
+                        "w": op.w,
+                        "h": op.h,
+                        "r": op.r,
+                        "points": op.points,
+                        "fill": op.fill,
+                        "opacity": op.opacity,
+                    })
+                })
+                .collect();
             json!({
                 "kind": b.kind,
                 "html": b.html,
@@ -106,6 +124,11 @@ fn blocks_to_json(blocks: &[RenderBlock]) -> Vec<Value> {
                 "alt": b.alt,
                 "width": b.width,
                 "height": b.height,
+                "vb_x": b.vb_x,
+                "vb_y": b.vb_y,
+                "vb_w": b.vb_w,
+                "vb_h": b.vb_h,
+                "ops": ops,
             })
         })
         .collect()
@@ -166,6 +189,11 @@ impl LnsBrowser {
                     alt: None,
                     width: None,
                     height: None,
+                    vb_x: None,
+                    vb_y: None,
+                    vb_w: None,
+                    vb_h: None,
+                    ops: Vec::new(),
                 }],
                 html: Some(html),
                 truncated: false,
@@ -189,6 +217,11 @@ impl LnsBrowser {
                     alt: None,
                     width: None,
                     height: None,
+                    vb_x: None,
+                    vb_y: None,
+                    vb_w: None,
+                    vb_h: None,
+                    ops: Vec::new(),
                 }],
                 html: Some(html),
                 truncated: false,

@@ -51,7 +51,7 @@ Item {
     property string pubName: ""
     property string pubTitle: ""
     property string pubLocalPath: ""
-    property string pubMode: "cid" // "cid" | "page"
+    property string pubMode: "page" // defaults to On-Chain HTML (<= 78 KB); switches to "cid" if storage is ready
     property string pubHtml: "<!doctype html>\n<html>\n<head>\n  <meta charset=\"utf-8\">\n  <title>Hello Logos</title>\n  <style>body{background:#ffffff;color:#18202c} a{color:#0055ff}</style>\n</head>\n<body>\n  <h1 style=\"color:#0055ff\">Hello from LNS + Logos Storage</h1>\n  <p>Resolved on LEZ 0.4 and verified by SHA-256.</p>\n  <p><a href=\"lns://jef\">Visit lns://jef</a> &middot; <a href=\"https://nameswallet.app/browser\">nameswallet.app/browser &rarr;</a></p>\n</body>\n</html>"
     property var lastPublished: null
     property string lastDeepLink: ""
@@ -210,6 +210,28 @@ Item {
         notice = "Copied to clipboard."
     }
 
+    function openExternalUrl(rawUrl) {
+        var target = String(rawUrl || "").trim()
+        if (!Logic.isExternalHttpsUrl(target)) {
+            problem = "Only https:// external links can be opened."
+            return
+        }
+        var opened = false
+        try {
+            opened = Qt.openUrlExternally(target)
+        } catch (e) {
+            opened = false
+        }
+        if (opened) {
+            pendingExternalUrl = ""
+            notice = "Opened " + target + " in your browser."
+        } else {
+            // Basecamp's plugin sandbox refuses https:// in Qt.openUrlExternally — copy cleanly instead
+            copyText(target)
+            notice = "Basecamp's sandbox blocks opening external https:// links directly — copied " + target + " to your clipboard so you can paste it into your browser."
+        }
+    }
+
     function callCore(moduleName, method, args, done, failed, timeoutMs) {
         if (!bridgeReady) {
             Qt.callLater(function() { failed("Run inside Basecamp with `" + moduleName + "` loaded.") })
@@ -296,10 +318,16 @@ Item {
                 if (!basecampStorageInstalled) storageBackend = "http"
             } else {
                 storageApiInput = ""
-                if (!basecampStorageInstalled) storageBackend = "none"
+                if (!basecampStorageInstalled) {
+                    storageBackend = "none"
+                    pubMode = "page"
+                }
             }
         }, function() {
-            if (!basecampStorageInstalled) storageBackend = "none"
+            if (!basecampStorageInstalled) {
+                storageBackend = "none"
+                pubMode = "page"
+            }
         }, 5000)
     }
 
@@ -538,7 +566,7 @@ Item {
         }
         loading = false
         pageData = null
-        problem = "Cannot load CID " + Logic.shortHash(cid) + ": no Logos Storage node is configured. Install Basecamp's Storage module or set a real Logos Storage URL in Settings (note: port 8080 is Logos Blockchain, not Storage)."
+        problem = "Cannot load CID " + Logic.shortHash(cid) + ": no Logos Storage module is installed in Basecamp and no external Storage node is configured. On-Chain HTML (≤ 78 KB) sites work without a storage node; to open CID sites, configure a real Logos Storage node in Settings."
     }
 
     function handoffToNames(intentParams, summaryLabel) {
@@ -832,28 +860,27 @@ Item {
 
                     Text {
                         Layout.fillWidth: true
-                        text: "External web link (opens outside Basecamp): " + root.pendingExternalUrl
+                        text: "External web link: " + root.pendingExternalUrl
                         color: root.ink
                         font.family: root.mono
                         font.pixelSize: px(11)
                         elide: Text.ElideMiddle
                     }
                     Rectangle {
-                        implicitWidth: openExtTxt.implicitWidth + px(16); height: px(26); radius: px(6); color: root.brass
-                        Text { id: openExtTxt; anchors.centerIn: parent; text: "Open in Browser"; color: root.slate; font.bold: true; font.pixelSize: px(11) }
+                        implicitWidth: copyExtTxt.implicitWidth + px(16); height: px(26); radius: px(6); color: root.brass
+                        Text { id: copyExtTxt; anchors.centerIn: parent; text: "Copy Link"; color: root.slate; font.bold: true; font.pixelSize: px(11) }
                         MouseArea {
                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                var target = root.pendingExternalUrl
-                                root.pendingExternalUrl = ""
-                                Qt.openUrlExternally(target)
-                            }
+                            onClicked: { root.copyText(root.pendingExternalUrl); root.notice = "Copied " + root.pendingExternalUrl + " — paste it into your browser." }
                         }
                     }
                     Rectangle {
-                        implicitWidth: copyExtTxt.implicitWidth + px(14); height: px(26); radius: px(6); color: root.raised; border.color: root.line
-                        Text { id: copyExtTxt; anchors.centerIn: parent; text: "Copy"; color: root.ink; font.pixelSize: px(11) }
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(root.pendingExternalUrl) }
+                        implicitWidth: openExtTxt.implicitWidth + px(16); height: px(26); radius: px(6); color: root.raised; border.color: root.line
+                        Text { id: openExtTxt; anchors.centerIn: parent; text: "Open in Browser"; color: root.ink; font.pixelSize: px(11) }
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: root.openExternalUrl(root.pendingExternalUrl)
+                        }
                     }
                     Rectangle {
                         implicitWidth: px(26); height: px(26); radius: px(6); color: root.raised; border.color: root.line
@@ -897,7 +924,7 @@ Item {
                         Layout.fillWidth: true; wrapMode: Text.WordWrap; color: root.dim; font.pixelSize: px(11)
                         text: root.basecampStorageInstalled
                             ? ("Basecamp's built-in Logos Storage module is installed (" + (root.basecampStorageRunning ? "running" : "stopped") + "). It is used automatically unless you enter an external Storage API URL below.")
-                            : "Basecamp's Storage module is not installed. Enter your real Logos Storage node API URL below (note: port 8080 is used by the Logos Blockchain node, not Storage)."
+                            : "No Logos Storage module is installed in this Basecamp build. You can still browse and publish On-Chain HTML (≤ 78 KB) sites directly on LEZ 0.4 with no storage node. For CID sites, enter a real Logos Storage node URL below (port 8080 is Logos Blockchain, not Storage)."
                     }
                     RowLayout {
                         visible: root.basecampStorageInstalled
@@ -968,6 +995,12 @@ Item {
                             Text { id: pageModeTxt; anchors.centerIn: parent; text: "On-Chain HTML (≤ 78 KB)"; color: root.pubMode === "page" ? root.slate : root.ink; font.bold: root.pubMode === "page"; font.pixelSize: px(11) }
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.pubMode = "page" }
                         }
+                    }
+
+                    Text {
+                        visible: root.pubMode === "cid" && root.storageBackend === "none"
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap; color: root.alarm; font.pixelSize: px(11)
+                        text: "No Logos Storage module is installed in Basecamp and no external Storage node is configured. Use On-Chain HTML (≤ 78 KB) above so anyone can open your page right away, or set a real Logos Storage node in Settings."
                     }
 
                     RowLayout {
@@ -1110,7 +1143,27 @@ Item {
                                 delegate: Item {
                                     required property var modelData
                                     Layout.fillWidth: true
-                                    implicitHeight: modelData.kind === "image" ? imgItem.implicitHeight : txtItem.implicitHeight
+                                    implicitHeight: modelData.kind === "svg"
+                                        ? svgCanvas.height
+                                        : (modelData.kind === "image" ? imgItem.height : txtItem.implicitHeight)
+
+                                    Canvas {
+                                        id: svgCanvas
+                                        visible: modelData.kind === "svg"
+                                        width: Math.min(parent.width, modelData.width ? px(modelData.width) : parent.width)
+                                        height: (modelData.vb_w && modelData.vb_h && modelData.vb_w > 0)
+                                            ? Math.max(px(24), Math.round(width * modelData.vb_h / modelData.vb_w))
+                                            : px(100)
+                                        renderStrategy: Canvas.Cooperative
+                                        onPaint: {
+                                            if (modelData.kind !== "svg") return
+                                            var ctx = getContext("2d")
+                                            Logic.drawSvgToCanvas(ctx, modelData, width, height)
+                                        }
+                                        onWidthChanged: if (visible) requestPaint()
+                                        onHeightChanged: if (visible) requestPaint()
+                                        Component.onCompleted: if (visible) requestPaint()
+                                    }
 
                                     Image {
                                         id: imgItem
@@ -1127,7 +1180,7 @@ Item {
 
                                     Text {
                                         id: txtItem
-                                        visible: modelData.kind !== "image"
+                                        visible: modelData.kind !== "image" && modelData.kind !== "svg"
                                         width: parent.width
                                         textFormat: Text.RichText
                                         wrapMode: Text.WordWrap
@@ -1184,7 +1237,7 @@ Item {
                                 : ("Logos Storage: External node unreachable (" + root.storageApiInput + ")"))
                             : root.storageBackend === "checking"
                                 ? "Logos Storage: Checking Basecamp Storage module..."
-                                : "Logos Storage: Not configured (install Basecamp Storage or pick a node URL in Settings)"
+                                : "No Logos Storage module installed — On-Chain HTML (≤ 78 KB) works now; configure Storage in Settings for CIDs"
                     color: (root.storageBackend === "basecamp" && root.basecampStorageRunning)
                         || (root.storageBackend === "http" && root.storageInfo && root.storageInfo.online && !root.storageInfo.mock)
                         ? root.good : root.dim
