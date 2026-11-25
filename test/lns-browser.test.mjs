@@ -13,7 +13,7 @@ import {
   recordAddress,
   seal,
 } from "../src/lns.js";
-import { StorageClient, sha256Hex } from "../src/storage.js";
+import { StorageClient, bareMimeType, sha256Hex } from "../src/storage.js";
 import { buildPublishDeepLink, injectLnsBridge, publishPath } from "../src/manifest.js";
 import { createBrowserServer } from "../src/server.js";
 
@@ -32,6 +32,12 @@ async function startMockStorage() {
       return;
     }
     if (req.method === "POST" && req.url === "/api/storage/v1/data") {
+      const ct = req.headers["content-type"] || "";
+      if (ct.includes(";")) {
+        res.writeHead(422, { "Content-Type": "text/plain" });
+        res.end(`The MIME type '${ct}' is not valid`);
+        return;
+      }
       const chunks = [];
       for await (const c of req) chunks.push(c);
       const buf = Buffer.concat(chunks);
@@ -39,7 +45,7 @@ async function startMockStorage() {
       const cid = `zDvMockCid${String(seq).padStart(4, "0")}${sha256Hex(buf).slice(0, 12)}`;
       blobs.set(cid, {
         bytes: buf,
-        contentType: req.headers["content-type"] || "application/octet-stream",
+        contentType: ct || "application/octet-stream",
       });
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end(cid);
@@ -271,5 +277,31 @@ test("StorageClient refuses publishing to stand-in local-storage.js and reports 
     );
   } finally {
     await new Promise((r) => standin.close(r));
+  }
+});
+
+test("StorageClient.upload strips MIME parameters (e.g. charset) while publishPath keeps them in the manifest", async () => {
+  assert.equal(bareMimeType("text/html; charset=utf-8"), "text/html");
+  assert.equal(bareMimeType("Text/CSS; charset=UTF-8; foo=bar"), "text/css");
+  assert.equal(bareMimeType("application/vnd.logos.site-manifest+json"), "application/vnd.logos.site-manifest+json");
+  assert.equal(bareMimeType(""), "application/octet-stream");
+
+  const mockStorage = await startMockStorage();
+  try {
+    const client = new StorageClient(mockStorage.baseUrl);
+    const uploaded = await client.upload(Buffer.from("<h1>Hi</h1>"), {
+      filename: "index.html",
+      contentType: "text/html; charset=utf-8",
+    });
+    assert.equal(mockStorage.blobs.get(uploaded.cid).contentType, "text/html");
+
+    const published = await publishPath(client, DEMO_SITE_DIR, { title: "Demo Site" });
+    const manifestBlob = mockStorage.blobs.get(published.rootCid);
+    assert.equal(manifestBlob.contentType, "application/vnd.logos.site-manifest+json");
+    const manifest = JSON.parse(manifestBlob.bytes.toString("utf-8"));
+    assert.equal(manifest.files["/index.html"].contentType, "text/html; charset=utf-8");
+    assert.equal(mockStorage.blobs.get(manifest.files["/index.html"].cid).contentType, "text/html");
+  } finally {
+    await mockStorage.close();
   }
 });

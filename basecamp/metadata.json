@@ -1,7 +1,7 @@
 {
   "name": "lns_browser",
   "display_name": "LNS Browser",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "ui_qml",
   "category": "web",
   "description": "Native in-Basecamp web browser for LNS URLs and SHA-256 verified Logos Storage CID sites (zero external network leaks)",
@@ -14,7 +14,7 @@
     },
     {
       "name": "lns_browser_core",
-      "version": ">=0.1.7"
+      "version": ">=0.1.8"
     }
   ],
   "provides": [

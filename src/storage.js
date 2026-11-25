@@ -13,6 +13,12 @@ export function sha256Hex(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/** Strips MIME parameters (everything from ";") because real Logos Storage nodes reject them with HTTP 422. */
+export function bareMimeType(contentType = "application/octet-stream") {
+  const bare = String(contentType || "").split(";")[0].trim().toLowerCase();
+  return bare || "application/octet-stream";
+}
+
 export class StorageClient {
   constructor(baseUrl = DEFAULT_STORAGE_API, { fetchImpl = fetch, timeoutMs = 30_000, allowStandin = false } = {}) {
     this.baseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
@@ -84,7 +90,7 @@ export class StorageClient {
     const res = await this.fetchImpl(`${this.baseUrl}/data`, {
       method: "POST",
       headers: {
-        "Content-Type": contentType,
+        "Content-Type": bareMimeType(contentType),
         "Content-Disposition": `attachment; filename="${safeName}"`,
       },
       body: buf,

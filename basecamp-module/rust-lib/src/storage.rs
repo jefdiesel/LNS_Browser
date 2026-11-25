@@ -56,6 +56,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Strips MIME parameters (everything from ';') because real Logos Storage nodes reject them with HTTP 422.
+pub fn bare_mime_type(mime: &str) -> &str {
+    let bare = mime.split(';').next().unwrap_or("").trim();
+    if bare.is_empty() {
+        "application/octet-stream"
+    } else {
+        bare
+    }
+}
+
 pub fn mime_for_path(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
@@ -306,10 +316,11 @@ impl StorageClient {
             .chars()
             .map(|c| if matches!(c, '"' | '\r' | '\n' | '/' | '\\') { '_' } else { c })
             .collect();
+        let bare_mime = bare_mime_type(mime);
         let resp = self
             .agent
             .post(&format!("{}/data", self.base))
-            .set("Content-Type", mime)
+            .set("Content-Type", bare_mime)
             .set("Content-Disposition", &format!("attachment; filename=\"{safe_name}\""))
             .send_bytes(bytes)
             .map_err(|e| format!("Storage upload failed: {e}"))?;
