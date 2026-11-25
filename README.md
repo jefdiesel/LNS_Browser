@@ -33,11 +33,11 @@ node src/cli.js resolve lns://jef
 npm test
 ```
 
-## Basecamp App (`basecamp/` v0.2.6 + `basecamp-module/` v0.1.6)
+## Basecamp App (`basecamp/` v0.2.8 + `basecamp-module/` v0.1.8)
 
 - `lns_browser` (`ui_qml`) + `lns_browser_core` (Rust core module) built with `logos-module-builder`.
-- Resolves `lns://` URLs via `names.resolve` (with automatic retry on `busy: true`) and on-chain `SetPage` HTML (`names.page`, ≤ 78 KB) on LEZ 0.4.
-- Uses Basecamp's built-in `storage_module` when installed (never defaults to port `8080`, which belongs to the Logos Blockchain node), routing all `int`/`bool`/`[tstr]` `storage_module` calls (`connect`, `downloadChunks`, `downloadToUrl`, `uploadUrl`, `uploadInit`) through `lns_browser_core` via `logos-rust-sdk` with real Rust types, plus a local **Storage peers** setting (`~/.config/lns-browser/config.json`) as a workaround for upstream Logos Storage discovery (#1556). When no Storage module is installed, says so plainly and defaults Publish to **On-Chain HTML (≤ 78 KB)**.
-- Renders pages natively with zero JS and zero external subresources: safe colors, **SVG-as-Canvas** (`Canvas` + structured ops, zero QtSvg dependency), click-to-confirm `https://` links (**Open in Browser** via `lns_browser_core.open_external_url` + **Copy Link**).
+- Resolves `lns://` URLs via `names.resolve` and on-chain `SetPage` HTML (`names.page`, ≤ 78 KB) on LEZ 0.4, automatically retrying both on `busy: true` (every 1 s, up to 20 s).
+- Uses Basecamp's built-in `storage_module` when installed (never defaults to port `8080`, which belongs to the Logos Blockchain node), routing all `int`/`bool`/`[tstr]` `storage_module` calls (`connect`, `downloadChunks`, `downloadToUrl`, `uploadUrl`, `uploadInit`) through `lns_browser_core` via `logos-rust-sdk` with real Rust types, stripping MIME parameters (`; charset=...`) on HTTP `POST /data` uploads to real Logos Storage nodes, plus a local **Storage peers** setting (`~/.config/lns-browser/config.json`) as a workaround for upstream Logos Storage discovery (#1556). When no Storage module is installed, says so plainly and defaults Publish to **On-Chain HTML (≤ 78 KB)**.
+- Renders pages natively with zero JS and zero external subresources: safe colors, **SVG-as-Canvas** (`Canvas` + structured ops with Qt `QVariantList` array-like normalization, zero QtSvg dependency), click-to-confirm `https://` links (**Open in Browser** via `lns_browser_core.open_external_url` + **Copy Link**).
 - Publishes via Basecamp's `names.publish_site` intent so Names verifies ownership and asks for a single-click approval before signing.
 - Includes a zero-dependency WYSIWYG Site Builder at `http://127.0.0.1:7777/editor` (`src/ui/editor.html`) and AI agent authoring guide in [`AGENT.md`](./AGENT.md).

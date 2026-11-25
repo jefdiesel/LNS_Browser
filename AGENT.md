@@ -47,7 +47,7 @@ To ensure your page looks great in **both**:
   a { color: #0055ff; }
   ```
 - **Use semantic HTML tags** from the Basecamp allowlist: `h1`–`h6`, `p`, `ul`, `ol`, `li`, `b`/`strong`, `i`/`em`, `u`, `small`, `code`, `pre`, `blockquote`, `table`/`thead`/`tbody`/`tr`/`th`/`td`, `div`, `span`, `a`, `br`, `hr`.
-- **Inline `<svg>` graphics:** Always include `xmlns="http://www.w3.org/2000/svg"`, explicit `viewBox="0 0 W H"`, `aria-label="..."`, and an explicit hex `fill="#0055ff"` (or class `fill` rule in `<style>`). Never put `<script>` or `on*=` attributes inside `<svg>`.
+- **Inline `<svg>` graphics:** Always include `xmlns="http://www.w3.org/2000/svg"`, explicit `viewBox="0 0 W H"`, `aria-label="..."`, and an explicit hex `fill="#0055ff"` (or class `fill` rule in `<style>`). Basecamp renders inline `<svg>` natively via **SVG-as-Canvas** (`<path>`, `<use href="#id">`, `<rect>`, `<circle>`, `<polygon>`, hex `fill`, and `opacity` — zero QtSvg dependency). Never put `<script>`, `<foreignObject>`, or `on*=` attributes inside `<svg>`.
 - **Accessible fallback heading:** If your hero is an `<svg>` banner, include `<h1 class="sr">Page Title</h1>` with `.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }` — Basecamp automatically hides `.sr` when the `<svg>` renders and keeps it visible if no `<svg>` is present.
 - **No JS required for core content:** Progressive enhancement is fine for the localhost browser, but core text and links must exist in static HTML so Basecamp (which runs zero JS) renders the complete page.
 
@@ -114,12 +114,16 @@ The `names` core module refuses state-mutating calls (`set_profile`, `set_page`)
 
 2. **CLI Publish (Logos Storage + Names CLI):**
    ```bash
-   # 1. Upload file or directory to local Logos Storage node and print CID + SHA-256
-   lns-browser publish ./my-site --name helloworld --title "Hello World"
+   # 1. Upload file or directory to a REAL Logos Storage node and print CID + SHA-256
+   #    (never port 8080 — port 8080 belongs to the Logos Blockchain node, not Storage)
+   lns-browser publish ./my-site --storage http://127.0.0.1:<STORAGE_PORT>/api/storage/v1 --name helloworld --title "Hello World"
 
-   # 2. Commit CID + SHA-256 on chain using the Names CLI (uses your wallet)
+   # 2. Commit bare CID + SHA-256 on chain using the Names CLI (uses your wallet; no "cid=" or "cid://" prefix)
    names profile helloworld --cid <ROOT_CID> --set cid.sha256=<SHA256> --set cid.type=single
    ```
+   - **Real Logos Storage MIME rule:** When posting directly to `POST /api/storage/v1/data`, always send a **bare** `Content-Type` with no `; charset=...` parameters (e.g. `text/html`, `text/css`, `application/json`, `application/vnd.logos.site-manifest+json`). Real Logos Storage nodes reject parameterized types like `text/html; charset=utf-8` with HTTP 422 (`The MIME type '...' is not valid`). Keep `; charset=utf-8` only inside the manifest entry's `contentType` field (`lns-browser` v0.1.8 / v0.2.8 strips parameters automatically on upload).
+   - **Peer discovery workaround (upstream #1556):** If a Basecamp Storage node cannot automatically discover who holds a CID, add `peerId /ip4/…/tcp/…` lines in Basecamp LNS Browser under **Settings → Storage peers** (saved locally in `~/.config/lns-browser/config.json`; never commit peer configs to a repo).
+   - **Busy retries:** Both `names.resolve` and `names.page` can reply with `{"busy": true}` while Names is syncing; retry every 1 s up to 20 s.
 
 3. **Localhost HTTP API (`POST http://127.0.0.1:7777/api/publish`):**
    ```json
@@ -145,5 +149,6 @@ Before handing a page to the user or publishing:
 - [ ] **Only `lns://`, `cid://`, relative paths, or `https://`** in `<a href>`.
 - [ ] **Byte size verified:** `Buffer.byteLength(html, "utf8") <= 78000` if targeting on-chain `SetPage`.
 - [ ] **Explicit colors:** `body { background: #...; color: #...; }` and `a { color: #...; }` set if a light or custom theme is intended.
-- [ ] **Inline SVG validated:** no `<script>`, no `on*=` attributes, explicit `viewBox` and `fill`.
-- [ ] **SHA-256 recorded:** when publishing to Logos Storage CID, always include both `cid` and `cid.sha256` (plus `cid.type`) so browsers show `SHA-256 ✓`.
+- [ ] **Inline SVG validated:** no `<script>`, no `<foreignObject>`, no `on*=` attributes, explicit `viewBox` and hex `fill`, using `<path>` / `<use>` / `<rect>` / `<circle>` / `<polygon>`.
+- [ ] **Real Logos Storage node & bare MIME:** upload only to a real Logos Storage node (never port `8080`, never a local stand-in mock) with bare `Content-Type` on `POST /data` (no `; charset=...`).
+- [ ] **SHA-256 recorded:** when publishing to Logos Storage CID, always set bare `cid` (no `cid=`/`cid://` prefix), `cid.sha256`, and `cid.type` (`single` or `manifest`) so browsers show `SHA-256 ✓`.
