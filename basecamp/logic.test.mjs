@@ -129,6 +129,14 @@ test("buildProfileEntries validates CID and SHA-256", () => {
 
 test("answer + shortHash", () => {
   assert.deepEqual(answer(JSON.stringify({ success: true, value: { name: "jef" } })), { ok: true, value: { name: "jef" } });
+  assert.deepEqual(answer(JSON.stringify({ code: "invalid_args", message: "expected [tstr] array" })), {
+    ok: false,
+    error: "expected [tstr] array",
+  });
+  assert.deepEqual(answer({ success: false, message: "exact bridge error" }), {
+    ok: false,
+    error: "exact bridge error",
+  });
   assert.equal(shortHash("0123456789abcdef0123456789abcdef", 6, 4), "012345...cdef");
 });
 

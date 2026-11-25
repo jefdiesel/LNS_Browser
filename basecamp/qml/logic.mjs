@@ -27,7 +27,18 @@ export function answer(reply) {
     return { ok: false, error: "unexpected reply from core module: " + String(cur) };
   }
   if (cur.success === true) return { ok: true, value: cur.value };
-  if (cur.success === false) return { ok: false, error: cur.error || "unknown module error" };
+  if (cur.success === false) {
+    return {
+      ok: false,
+      error: String(cur.error || cur.message || JSON.stringify(cur)),
+    };
+  }
+  if (cur.error || (cur.code && cur.message)) {
+    return {
+      ok: false,
+      error: String(cur.error || cur.message || JSON.stringify(cur)),
+    };
+  }
   return { ok: true, value: cur };
 }
 

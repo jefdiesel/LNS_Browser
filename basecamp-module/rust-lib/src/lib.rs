@@ -43,6 +43,10 @@ pub trait LnsBrowserCoreModule: Send + 'static {
     /// Opens a strictly validated `https://` URL in the system default web browser.
     fn open_external_url(&mut self, url: String) -> String;
 
+    /// Calls Basecamp's `storage_module.connect(peerId, peerAddresses)` through `logos-rust-sdk`
+    /// with a real `Vec<String>` JSON array (avoiding QML bridge array marshalling limitations).
+    fn storage_connect_peer(&mut self, peer_id: String, addrs_json: String) -> String;
+
     /// Checks whether the configured local Logos Storage node is reachable.
     fn storage_status(&mut self) -> String;
 
@@ -516,6 +520,58 @@ impl LnsBrowserCoreModule for LnsBrowser {
         }
     }
 
+    fn storage_connect_peer(&mut self, peer_id: String, addrs_json: String) -> String {
+        let clean_id = peer_id.trim().to_owned();
+        if !(16..=128).contains(&clean_id.len())
+            || !clean_id.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            return err(format!("invalid peerId `{clean_id}`"));
+        }
+        let addrs: Vec<String> = match serde_json::from_str::<Vec<String>>(&addrs_json) {
+            Ok(list) => list
+                .into_iter()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Err(e) => return err(format!("invalid addrs_json (expected JSON string array): {e}")),
+        };
+        if addrs.is_empty() {
+            return err("peerAddresses must contain at least one multiaddr (e.g. /ip4/…/tcp/…)");
+        }
+        for addr in &addrs {
+            if !addr.starts_with('/') || addr.chars().any(|c| c.is_control() || c.is_whitespace()) {
+                return err(format!("invalid multiaddr `{addr}`"));
+            }
+        }
+        match invoke_storage_connect(&clean_id, &addrs) {
+            Ok(reply) => {
+                eprintln!(
+                    "lns_browser_core: storage_module.connect({clean_id}, {addrs:?}) -> {reply}"
+                );
+                if reply["success"].as_bool() == Some(false) {
+                    let detail = reply["error"]
+                        .as_str()
+                        .or_else(|| reply["message"].as_str())
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| reply.to_string());
+                    return err(format!("storage_module.connect refused: {detail}"));
+                }
+                ok(json!({
+                    "sent": true,
+                    "peer_id": clean_id,
+                    "addrs": addrs,
+                    "reply": reply,
+                }))
+            }
+            Err(e) => {
+                eprintln!(
+                    "lns_browser_core: storage_module.connect({clean_id}, {addrs:?}) FAILED: {e}"
+                );
+                err(e)
+            }
+        }
+    }
+
     fn storage_status(&mut self) -> String {
         if self.storage_api.trim().is_empty() {
             return ok(json!({
@@ -595,6 +651,38 @@ impl LnsBrowserCoreModule for LnsBrowser {
         }
         self.config_get()
     }
+}
+
+#[cfg(not(test))]
+fn invoke_storage_connect(peer_id: &str, addrs: &[String]) -> Result<Value, String> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    thread_local! {
+        static STORAGE_CLIENT: RefCell<Option<Rc<logos_rust_sdk::PluginProxy>>> = const { RefCell::new(None) };
+    }
+
+    let proxy = STORAGE_CLIENT.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if let Some(ref existing) = *slot {
+            Rc::clone(existing)
+        } else {
+            let created = Rc::new(logos_rust_sdk::LogosModuleSDK::new().plugin("storage_module"));
+            *slot = Some(Rc::clone(&created));
+            created
+        }
+    });
+
+    let args = json!([peer_id, addrs]);
+    proxy
+        .call_json_with_timeout("connect", &args, Duration::from_secs(10))
+        .map_err(|e| format!("storage_module.connect SDK error: {e}"))
+}
+
+#[cfg(test)]
+fn invoke_storage_connect(peer_id: &str, addrs: &[String]) -> Result<Value, String> {
+    Ok(json!({ "success": true, "peer_id": peer_id, "addrs": addrs }))
 }
 
 #[cfg(not(test))]

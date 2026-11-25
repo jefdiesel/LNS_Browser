@@ -34,6 +34,7 @@ Item {
     property string storageBackend: "checking"
     property bool basecampStorageInstalled: false
     property bool basecampStorageRunning: false
+    property bool basecampStorageReady: false
     property bool basecampStorageStarting: false
     property string basecampPeerId: ""
     property string basecampNetwork: ""
@@ -136,11 +137,13 @@ Item {
                 if (payload.success) {
                     root.basecampStorageRunning = true
                     root.storageBackend = "basecamp"
-                    root.readBasecampStorageIdentity()
-                    root.connectStoragePeers(null)
+                    root.verifyBasecampStorageReadyAndConnect()
                 } else {
                     root.basecampStorageRunning = false
-                    root.problem = "Basecamp Storage module failed to start: " + String(payload.message || "unknown error")
+                    root.basecampStorageReady = false
+                    var startErr = String(payload.message || payload.error || JSON.stringify(payload))
+                    console.log("lns_browser: storageStart failed:", startErr)
+                    root.problem = "Basecamp Storage module failed to start: " + startErr
                 }
                 return
             }
@@ -150,9 +153,12 @@ Item {
                 var q = root.peerConnectQueue
                 var peer = q.peers[q.idx]
                 if (payload.success) {
+                    console.log("lns_browser: storageConnect ok for", peer.peerId, JSON.stringify(payload))
                     q.connected += 1
                 } else {
-                    q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + String(payload.message || "connect failed"))
+                    var detail = String(payload.message || payload.error || JSON.stringify(payload))
+                    console.log("lns_browser: storageConnect failed for", peer.peerId, detail)
+                    q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + detail)
                 }
                 q.idx += 1
                 root.stepPeerConnectQueue()
@@ -275,8 +281,14 @@ Item {
         }
         logos.callModuleAsync(moduleName, method, args, function(reply) {
             var res = Logic.answer(reply)
-            if (res.ok) done(res.value)
-            else failed(res.error)
+            if (res.ok) {
+                done(res.value)
+            } else {
+                var rawStr = ""
+                try { rawStr = typeof reply === "string" ? reply : JSON.stringify(reply) } catch (e) { rawStr = String(reply) }
+                console.log("lns_browser: " + moduleName + "." + method + " failed: " + res.error + " (raw=" + rawStr + ")")
+                failed(res.error)
+            }
         }, timeoutMs || 30000)
     }
 
@@ -308,16 +320,38 @@ Item {
             basecampStorageRunning = (running === true)
             storageBackend = "basecamp"
             if (basecampStorageRunning) {
-                readBasecampStorageIdentity()
-                connectStoragePeers(null)
+                // Verify the node is actually ready (non-empty peerId) before initial peer connect
+                verifyBasecampStorageReadyAndConnect()
             } else {
+                basecampStorageReady = false
                 startBasecampStorage()
             }
         }, function() {
             // 2. storage_module not installed: check if the user explicitly configured an HTTP node
             basecampStorageInstalled = false
             basecampStorageRunning = false
+            basecampStorageReady = false
             refreshHttpStorageStatus()
+        }, 5000)
+    }
+
+    function verifyBasecampStorageReadyAndConnect() {
+        callCore("storage_module", "peerId", [], function(pid) {
+            var cleanPid = String(pid || "").trim()
+            if (cleanPid !== "") {
+                basecampPeerId = cleanPid
+                basecampStorageRunning = true
+                basecampStorageReady = true
+                callCore("storage_module", "network", [], function(net) {
+                    basecampNetwork = String(net || "")
+                }, function() {}, 5000)
+                connectStoragePeers(null)
+            } else {
+                basecampStorageReady = false
+            }
+        }, function(err) {
+            console.log("lns_browser: storage_module peerId ready-check not ready yet:", err)
+            basecampStorageReady = false
         }, 5000)
     }
 
@@ -329,9 +363,14 @@ Item {
             if (onDone) onDone(false, peerConnectStatus)
             return
         }
-        if (parsed.peers.length === 0 || !basecampStorageRunning) {
+        if (parsed.peers.length === 0) {
             peerConnectStatus = ""
             if (onDone) onDone(true, "")
+            return
+        }
+        if (!basecampStorageReady) {
+            peerConnectStatus = "Waiting for Basecamp Storage node to finish starting before connecting peers..."
+            if (onDone) onDone(false, peerConnectStatus)
             return
         }
         peerConnectQueue = {
@@ -365,40 +404,55 @@ Item {
         }
         var peer = q.peers[q.idx]
         peerConnectTimeoutTimer.restart()
-        callCore("storage_module", "connect", [peer.peerId, peer.addrs], function() {
+        // Route through Rust core (`lns_browser_core.storage_connect_peer`) so `peerAddresses: [tstr]`
+        // is passed as a real `Vec<String>` over `logos-rust-sdk` instead of a QML JS array.
+        console.log("lns_browser: connecting storage peer via core:", peer.peerId, JSON.stringify(peer.addrs))
+        callCore("lns_browser_core", "storage_connect_peer", [peer.peerId, JSON.stringify(peer.addrs)], function(res) {
+            console.log("lns_browser: storage_connect_peer command sent:", JSON.stringify(res))
             // Wait for asynchronous `storageConnect` event (or 6s timeout)
         }, function(err) {
             peerConnectTimeoutTimer.stop()
-            q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + err)
+            var exactErr = String(err || "empty error from lns_browser_core.storage_connect_peer")
+            console.log("lns_browser: storage_connect_peer failed for", peer.peerId, exactErr)
+            q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + exactErr)
             q.idx += 1
             stepPeerConnectQueue()
-        }, 8000)
+        }, 12000)
     }
 
     function startBasecampStorage() {
         if (!basecampStorageInstalled || basecampStorageStarting) return
         basecampStorageStarting = true
+        basecampStorageReady = false
         callCore("storage_module", "loadConfigOrDefault", [], function(cfg) {
             var cfgStr = typeof cfg === "string" ? cfg : JSON.stringify(cfg || {})
             callCore("storage_module", "init", [cfgStr], function() {
-                callCore("storage_module", "start", [], function() {}, function(err) {
+                callCore("storage_module", "start", [], function() {
+                    // Completion arrives asynchronously via `storageStart` event
+                }, function(err) {
                     basecampStorageStarting = false
+                    console.log("lns_browser: storage_module.start reply:", err)
                     if (String(err).toLowerCase().indexOf("already") !== -1) {
                         basecampStorageRunning = true
-                        readBasecampStorageIdentity()
+                        verifyBasecampStorageReadyAndConnect()
                     }
                 }, 15000)
-            }, function() {
+            }, function(initErr) {
+                console.log("lns_browser: storage_module.init reply:", initErr)
                 // "already initialized" is expected when Basecamp shares one node across apps
-                callCore("storage_module", "start", [], function() {}, function(err) {
+                callCore("storage_module", "start", [], function() {
+                    // Completion arrives asynchronously via `storageStart` event
+                }, function(err) {
                     basecampStorageStarting = false
+                    console.log("lns_browser: storage_module.start reply:", err)
                     if (String(err).toLowerCase().indexOf("already") !== -1) {
                         basecampStorageRunning = true
-                        readBasecampStorageIdentity()
+                        verifyBasecampStorageReadyAndConnect()
                     }
                 }, 15000)
             }, 15000)
-        }, function() {
+        }, function(cfgErr) {
+            console.log("lns_browser: storage_module.loadConfigOrDefault failed:", cfgErr)
             basecampStorageStarting = false
         }, 10000)
     }
@@ -646,14 +700,14 @@ Item {
 
     function fetchCidPage(cid, expectedSha256, siteBase, path) {
         if (storageBackend === "basecamp") {
-            if (!basecampStorageRunning) {
+            if (!basecampStorageReady) {
                 loading = false
                 pageData = null
                 problem = "Basecamp's Storage node is still starting. Click 'Start Storage Node' in Settings or try again in a few seconds."
-                startBasecampStorage()
+                if (!basecampStorageStarting) startBasecampStorage()
                 return
             }
-            // Workaround for upstream discovery bug (#1556): connect configured peers before download
+            // Workaround for upstream discovery bug (#1556): connect configured peers via Rust core before download
             connectStoragePeers(function(_ok, connectErr) {
                 startBasecampDownload(cid, expectedSha256, siteBase, path, null, false)
                 if (connectErr) problem = connectErr
@@ -843,7 +897,7 @@ Item {
                 notice = basecampStorageInstalled
                     ? "Saved settings (using Basecamp's built-in Logos Storage module)."
                     : "Saved settings."
-                if (basecampStorageRunning && peersParsed.peers.length > 0) {
+                if (basecampStorageReady && peersParsed.peers.length > 0) {
                     connectStoragePeers(null)
                 }
             } else {
