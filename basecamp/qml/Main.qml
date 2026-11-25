@@ -47,6 +47,8 @@ Item {
     // Active storage_module async download / upload state
     property var activeDownload: null  // { cid, expectedSha256, siteBase, path, chunks, manifestRoot }
     property var activeUpload: null    // { sessionId, name, sha256, mode, sentChunk }
+    property var pendingResolve: null  // { seq, name, attempt, onResult, onError }
+    property int resolveSeq: 0
 
     property bool settingsOpen: false
     property bool publishOpen: false
@@ -111,6 +113,13 @@ Item {
                 root.stepPeerConnectQueue()
             }
         }
+    }
+
+    Timer {
+        id: resolveRetryTimer
+        interval: 1000
+        repeat: false
+        onTriggered: root.runPendingResolve()
     }
 
     // Handle incoming `lns.browse` intents and `storage_module` streaming events
@@ -290,6 +299,51 @@ Item {
                 failed(res.error)
             }
         }, timeoutMs || 30000)
+    }
+
+    function resolveNameWithRetry(name, onResult, onError) {
+        resolveRetryTimer.stop()
+        resolveSeq += 1
+        pendingResolve = {
+            seq: resolveSeq,
+            name: name,
+            attempt: 0,
+            onResult: onResult,
+            onError: onError
+        }
+        runPendingResolve()
+    }
+
+    function runPendingResolve() {
+        var req = pendingResolve
+        if (req === null) return
+        if (!bridgeReady) {
+            pendingResolve = null
+            req.onError("Run inside Basecamp with `names` loaded.")
+            return
+        }
+        var seq = req.seq
+        logos.callModuleAsync("names", "resolve", [req.name], function(reply) {
+            if (pendingResolve === null || pendingResolve.seq !== seq) return
+            var res = Logic.answer(reply)
+            if (res.ok) {
+                pendingResolve = null
+                req.onResult(res.value)
+                return
+            }
+            if (Logic.isBusyReply(reply, res.error) && req.attempt < 20) {
+                req.attempt += 1
+                console.log("lns_browser: names.resolve busy for", req.name, "retrying", req.attempt, "/ 20")
+                notice = "Names is busy — retrying (" + req.attempt + "/20)..."
+                resolveRetryTimer.restart()
+                return
+            }
+            var rawStr = ""
+            try { rawStr = typeof reply === "string" ? reply : JSON.stringify(reply) } catch (e) { rawStr = String(reply) }
+            console.log("lns_browser: names.resolve failed:", res.error, "(raw=" + rawStr + ")")
+            pendingResolve = null
+            req.onError(res.error)
+        }, 30000)
     }
 
     function initStorage() {
@@ -624,7 +678,9 @@ Item {
             rootVerified: !!rootVerified
         }
         downloadTimeoutTimer.restart()
-        callCore("storage_module", "downloadChunks", [cid, false, 65536, false, true], function() {}, function(err) {
+        // Route through Rust core (`lns_browser_core.storage_download_chunks`) so `chunkSize: int`
+        // and booleans are passed with real Rust types via `logos-rust-sdk` (QML bridge refuses JS numbers for int).
+        callCore("lns_browser_core", "storage_download_chunks", [cid, "false", "65536", "false", "true"], function() {}, function(err) {
             downloadTimeoutTimer.stop()
             activeDownload = null
             loading = false
@@ -640,6 +696,8 @@ Item {
             problem = parsed.error
             return
         }
+        resolveRetryTimer.stop()
+        pendingResolve = null
         parsedUrl = parsed
         urlInput = parsed.canonical
         problem = ""
@@ -655,7 +713,7 @@ Item {
             return
         }
 
-        callCore("names", "resolve", [parsed.name], function(record) {
+        resolveNameWithRetry(parsed.name, function(record) {
             if (!record) {
                 loading = false
                 siteInfo = null
@@ -765,7 +823,7 @@ Item {
         notice = ""
         lastDeepLink = ""
 
-        callCore("names", "resolve", [name], function(record) {
+        resolveNameWithRetry(name, function(record) {
             if (!record) {
                 loading = false
                 problem = "LNS name \"" + name + "\" is not registered on LEZ yet. Register it in Names first."
@@ -793,13 +851,14 @@ Item {
 
             // CID publish MUST go to a real Logos Storage node (never a stand-in stub)
             if (storageBackend === "basecamp") {
-                if (!basecampStorageRunning) {
+                if (!basecampStorageReady) {
                     loading = false
-                    problem = "Basecamp's Storage node is not running yet. Start it in Settings or switch to On-Chain HTML (≤ 78 KB)."
+                    problem = "Basecamp's Storage node is not ready yet. Start it in Settings or switch to On-Chain HTML (≤ 78 KB)."
                     return
                 }
                 if (pubLocalPath.trim().length > 0) {
-                    callCore("storage_module", "uploadUrl", [pubLocalPath.trim(), 65536, true], function(sessionId) {
+                    // Routed via Rust core so `chunkSize: int` & `advertise: bool` use real Rust types
+                    callCore("lns_browser_core", "storage_upload_url", [pubLocalPath.trim(), "65536", "true"], function(sessionId) {
                         activeUpload = { sessionId: String(sessionId), name: name, sha256: "", mode: "url", sentChunk: true }
                         notice = "Uploading file to Basecamp Logos Storage (advertising to P2P network)..."
                     }, function(err) {
@@ -813,7 +872,8 @@ Item {
                         return
                     }
                     var hashHex = Logic.sha256HexUtf8(pubHtml)
-                    callCore("storage_module", "uploadInit", ["index.html", 65536, true], function(sessionId) {
+                    // Routed via Rust core so `chunkSize: int` & `advertise: bool` use real Rust types
+                    callCore("lns_browser_core", "storage_upload_init", ["index.html", "65536", "true"], function(sessionId) {
                         var sid = String(sessionId)
                         activeUpload = { sessionId: sid, name: name, sha256: hashHex, mode: "chunks", sentChunk: true }
                         notice = "Uploading HTML to Basecamp Logos Storage (advertising to P2P network)..."

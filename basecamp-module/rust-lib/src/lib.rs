@@ -47,6 +47,47 @@ pub trait LnsBrowserCoreModule: Send + 'static {
     /// with a real `Vec<String>` JSON array (avoiding QML bridge array marshalling limitations).
     fn storage_connect_peer(&mut self, peer_id: String, addrs_json: String) -> String;
 
+    /// Calls `storage_module.downloadChunks(cid, local, chunkSize, isPrivate, advertise)` via
+    /// `logos-rust-sdk` with real Rust bool/integer arguments (QML passes strings).
+    fn storage_download_chunks(
+        &mut self,
+        cid: String,
+        local: String,
+        chunk_size: String,
+        is_private: String,
+        advertise: String,
+    ) -> String;
+
+    /// Calls `storage_module.downloadToUrl(cid, filePath, local, chunkSize, isPrivate, advertise)`
+    /// via `logos-rust-sdk` with real Rust bool/integer arguments (QML passes strings).
+    fn storage_download_to_url(
+        &mut self,
+        cid: String,
+        file_path: String,
+        local: String,
+        chunk_size: String,
+        is_private: String,
+        advertise: String,
+    ) -> String;
+
+    /// Calls `storage_module.uploadUrl(filePath, chunkSize, advertise)` via `logos-rust-sdk`
+    /// with real Rust integer/bool arguments (QML passes strings).
+    fn storage_upload_url(
+        &mut self,
+        file_path: String,
+        chunk_size: String,
+        advertise: String,
+    ) -> String;
+
+    /// Calls `storage_module.uploadInit(filename, chunkSize, advertise)` via `logos-rust-sdk`
+    /// with real Rust integer/bool arguments (QML passes strings).
+    fn storage_upload_init(
+        &mut self,
+        filename: String,
+        chunk_size: String,
+        advertise: String,
+    ) -> String;
+
     /// Checks whether the configured local Logos Storage node is reachable.
     fn storage_status(&mut self) -> String;
 
@@ -543,7 +584,7 @@ impl LnsBrowserCoreModule for LnsBrowser {
                 return err(format!("invalid multiaddr `{addr}`"));
             }
         }
-        match invoke_storage_connect(&clean_id, &addrs) {
+        match invoke_storage_module("connect", &json!([clean_id, addrs])) {
             Ok(reply) => {
                 eprintln!(
                     "lns_browser_core: storage_module.connect({clean_id}, {addrs:?}) -> {reply}"
@@ -570,6 +611,84 @@ impl LnsBrowserCoreModule for LnsBrowser {
                 err(e)
             }
         }
+    }
+
+    fn storage_download_chunks(
+        &mut self,
+        cid: String,
+        local: String,
+        chunk_size: String,
+        is_private: String,
+        advertise: String,
+    ) -> String {
+        let clean_cid = cid.trim().to_owned();
+        if !crate::storage::is_valid_cid(&clean_cid) {
+            return err(format!("invalid CID `{clean_cid}`"));
+        }
+        let local_b = parse_bool_arg(&local, false);
+        let chunk_i = parse_chunk_size_arg(&chunk_size, 65536);
+        let priv_b = parse_bool_arg(&is_private, false);
+        let adv_b = parse_bool_arg(&advertise, true);
+        let args = json!([clean_cid, local_b, chunk_i, priv_b, adv_b]);
+        relay_storage_result("downloadChunks", &args)
+    }
+
+    fn storage_download_to_url(
+        &mut self,
+        cid: String,
+        file_path: String,
+        local: String,
+        chunk_size: String,
+        is_private: String,
+        advertise: String,
+    ) -> String {
+        let clean_cid = cid.trim().to_owned();
+        if !crate::storage::is_valid_cid(&clean_cid) {
+            return err(format!("invalid CID `{clean_cid}`"));
+        }
+        let clean_path = file_path.trim().to_owned();
+        if clean_path.is_empty() {
+            return err("file_path must not be empty");
+        }
+        let local_b = parse_bool_arg(&local, false);
+        let chunk_i = parse_chunk_size_arg(&chunk_size, 65536);
+        let priv_b = parse_bool_arg(&is_private, false);
+        let adv_b = parse_bool_arg(&advertise, true);
+        let args = json!([clean_cid, clean_path, local_b, chunk_i, priv_b, adv_b]);
+        relay_storage_result("downloadToUrl", &args)
+    }
+
+    fn storage_upload_url(
+        &mut self,
+        file_path: String,
+        chunk_size: String,
+        advertise: String,
+    ) -> String {
+        let clean_path = file_path.trim().to_owned();
+        if clean_path.is_empty() {
+            return err("file_path must not be empty");
+        }
+        let chunk_i = parse_chunk_size_arg(&chunk_size, 65536);
+        let adv_b = parse_bool_arg(&advertise, true);
+        let args = json!([clean_path, chunk_i, adv_b]);
+        relay_storage_result("uploadUrl", &args)
+    }
+
+    fn storage_upload_init(
+        &mut self,
+        filename: String,
+        chunk_size: String,
+        advertise: String,
+    ) -> String {
+        let clean_name = if filename.trim().is_empty() {
+            "index.html".to_owned()
+        } else {
+            filename.trim().to_owned()
+        };
+        let chunk_i = parse_chunk_size_arg(&chunk_size, 65536);
+        let adv_b = parse_bool_arg(&advertise, true);
+        let args = json!([clean_name, chunk_i, adv_b]);
+        relay_storage_result("uploadInit", &args)
     }
 
     fn storage_status(&mut self) -> String {
@@ -653,8 +772,50 @@ impl LnsBrowserCoreModule for LnsBrowser {
     }
 }
 
+fn parse_bool_arg(raw: &str, default: bool) -> bool {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => true,
+        "false" | "0" | "no" => false,
+        _ => default,
+    }
+}
+
+fn parse_chunk_size_arg(raw: &str, default: i64) -> i64 {
+    raw.trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|&n| n >= 1024 && n <= 16 * 1024 * 1024)
+        .unwrap_or(default)
+}
+
+fn relay_storage_result(method: &str, args: &Value) -> String {
+    match invoke_storage_module(method, args) {
+        Ok(reply) => {
+            eprintln!("lns_browser_core: storage_module.{method}({args}) -> {reply}");
+            if reply["success"].as_bool() == Some(false) {
+                let detail = reply["error"]
+                    .as_str()
+                    .or_else(|| reply["message"].as_str())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| reply.to_string());
+                return err(format!("storage_module.{method} refused: {detail}"));
+            }
+            // Unwrap StdLogosResult { success: true, value } cleanly for QML callers
+            if reply["success"].as_bool() == Some(true) && reply.get("value").is_some() {
+                ok(reply["value"].clone())
+            } else {
+                ok(reply)
+            }
+        }
+        Err(e) => {
+            eprintln!("lns_browser_core: storage_module.{method}({args}) FAILED: {e}");
+            err(e)
+        }
+    }
+}
+
 #[cfg(not(test))]
-fn invoke_storage_connect(peer_id: &str, addrs: &[String]) -> Result<Value, String> {
+fn invoke_storage_module(method: &str, args: &Value) -> Result<Value, String> {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::Duration;
@@ -674,15 +835,14 @@ fn invoke_storage_connect(peer_id: &str, addrs: &[String]) -> Result<Value, Stri
         }
     });
 
-    let args = json!([peer_id, addrs]);
     proxy
-        .call_json_with_timeout("connect", &args, Duration::from_secs(10))
-        .map_err(|e| format!("storage_module.connect SDK error: {e}"))
+        .call_json_with_timeout(method, args, Duration::from_secs(15))
+        .map_err(|e| format!("storage_module.{method} SDK error: {e}"))
 }
 
 #[cfg(test)]
-fn invoke_storage_connect(peer_id: &str, addrs: &[String]) -> Result<Value, String> {
-    Ok(json!({ "success": true, "peer_id": peer_id, "addrs": addrs }))
+fn invoke_storage_module(method: &str, args: &Value) -> Result<Value, String> {
+    Ok(json!({ "success": true, "value": format!("mock-{method}"), "args": args }))
 }
 
 #[cfg(not(test))]

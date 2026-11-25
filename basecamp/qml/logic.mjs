@@ -121,11 +121,38 @@ export function parseStoragePeers(rawText) {
   return { ok: errors.length === 0, peers: peers, errors: errors };
 }
 
+export function isBusyReply(reply, errText) {
+  let cur = reply;
+  for (let depth = 0; depth < 3 && typeof cur === "string"; depth++) {
+    try {
+      cur = JSON.parse(cur);
+    } catch (e) {
+      break;
+    }
+  }
+  if (cur && typeof cur === "object") {
+    if (cur.busy === true) return true;
+    if (cur.value && typeof cur.value === "object" && cur.value.busy === true) return true;
+    if (String(cur.code || "").toLowerCase() === "busy") return true;
+  }
+  const low = String(errText || (cur && (cur.error || cur.message)) || "").toLowerCase();
+  return low === "busy" || low.indexOf("module is busy") !== -1 || low.indexOf("currently busy") !== -1;
+}
+
 export function formatUnreachableCidError(cid, detail) {
   const short = shortHash(cid, 12, 8);
   const raw = String(detail || "").trim();
   const lower = raw.toLowerCase();
+  // Never rewrite bridge/SDK/argument refusals or integrity mismatches as "CID not reachable".
   if (
+    lower.indexOf("call refused") !== -1 ||
+    lower.indexOf("expected integer") !== -1 ||
+    lower.indexOf("invalid_args") !== -1 ||
+    lower.indexOf("invalid arg") !== -1 ||
+    lower.indexOf("unknown method") !== -1 ||
+    lower.indexOf("unauthorized") !== -1 ||
+    lower.indexOf("sdk error") !== -1 ||
+    lower.indexOf("refused:") !== -1 ||
     lower.indexOf("sha-256 mismatch") !== -1 ||
     lower.indexOf("integrity mismatch") !== -1
   ) {

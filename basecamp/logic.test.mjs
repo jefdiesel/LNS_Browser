@@ -10,6 +10,7 @@ import {
   drawSvgToCanvas,
   extractSiteInfo,
   formatUnreachableCidError,
+  isBusyReply,
   isExternalHttpsUrl,
   isPort8080Url,
   isValidName,
@@ -150,6 +151,16 @@ test("storage_module helpers: sha256, base64, port 8080 check, unreachable CID e
   assert.equal(isPort8080Url("http://127.0.0.1:8089/api/storage/v1"), false);
   const msg = formatUnreachableCidError("z4W2jXDAE4ZM8yrBS1ThzzKkDLRPEiNPxDYBGA5mGPBdPKZ8pYP", "HTTP 404");
   assert.match(msg, /not on any Logos Storage node this browser can reach/i);
+  // Never rewrite bridge/argument refusals as "CID not reachable"
+  const refused = formatUnreachableCidError(
+    "z4W2jXDAE4ZM8yrBS1ThzzKkDLRPEiNPxDYBGA5mGPBdPKZ8pYP",
+    "Call refused: expected integer at arg 2, got number",
+  );
+  assert.equal(refused, "Call refused: expected integer at arg 2, got number");
+  // names.resolve busy detection
+  assert.equal(isBusyReply(JSON.stringify({ success: false, busy: true, error: "busy" }), "busy"), true);
+  assert.equal(isBusyReply({ success: false, error: "Names module is busy" }, "Names module is busy"), true);
+  assert.equal(isBusyReply({ success: false, error: "not found" }, "not found"), false);
   const clean = sanitizeHtmlFallback(
     `<html><head><style>body{background:#fff;color:#111} a{color:#0055ff} .hero{fill:#0055ff} .shadow{fill:#b8d0ff}</style></head><body><h1 class="sr">Hi</h1><svg class="hero" viewBox="0 0 63 8" aria-label="HELLO WORLD"><defs><path id="px" d="M0 0h1v7h-1z"/></defs><use class="shadow" href="#px" x="0.6" y="0.6"/><use href="#px" x="0" y="0"/></svg><p><a href="https://nameswallet.app/browser">Go &rarr;</a></p></body></html>`,
     "lns://helloworld",
