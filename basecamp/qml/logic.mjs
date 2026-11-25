@@ -8,6 +8,48 @@ const SHA256_RE = /^[0-9a-f]{64}$/i;
 const HTTPS_RE = /^https:\/\/[^\s/@]+\.[^\s/]+/i;
 const B64_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+export function isArrayLike(x) {
+  if (Array.isArray(x)) return true;
+  if (!x || typeof x !== "object") return false;
+  if (typeof x.length !== "number" || x.length < 0 || !isFinite(x.length) || Math.floor(x.length) !== x.length) {
+    return false;
+  }
+  if (x.length === 0) {
+    for (const k in x) {
+      if (Object.prototype.hasOwnProperty.call(x, k) && k !== "length") return false;
+    }
+    return true;
+  }
+  return 0 in x || x[0] !== undefined;
+}
+
+export function toArray(x) {
+  if (Array.isArray(x)) return x;
+  if (!isArrayLike(x)) return [];
+  const out = [];
+  for (let i = 0; i < x.length; i++) out.push(x[i]);
+  return out;
+}
+
+export function normalizeModuleValue(val, depth) {
+  const d = depth || 0;
+  if (val === null || val === undefined || typeof val !== "object" || d > 12) return val;
+  if (isArrayLike(val)) {
+    const arr = [];
+    for (let i = 0; i < val.length; i++) {
+      arr.push(normalizeModuleValue(val[i], d + 1));
+    }
+    return arr;
+  }
+  const out = {};
+  const keys = Object.keys(val);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    out[k] = normalizeModuleValue(val[k], d + 1);
+  }
+  return out;
+}
+
 export function answer(reply) {
   let cur = reply;
   for (let depth = 0; depth < 3 && typeof cur === "string"; depth++) {
@@ -26,6 +68,7 @@ export function answer(reply) {
   if (typeof cur !== "object") {
     return { ok: false, error: "unexpected reply from core module: " + String(cur) };
   }
+  cur = normalizeModuleValue(cur);
   if (cur.success === true) return { ok: true, value: cur.value };
   if (cur.success === false) {
     return {
@@ -56,25 +99,14 @@ export function parseStorageEventPayload(data) {
         return null;
       }
     }
-    if (Array.isArray(raw)) {
+    if (isArrayLike(raw)) {
       if (raw.length === 0) return null;
-      raw = raw[0];
-      continue;
-    }
-    if (
-      typeof raw === "object" &&
-      typeof raw.length === "number" &&
-      raw.length > 0 &&
-      raw[0] !== undefined &&
-      raw.success === undefined &&
-      raw.sessionId === undefined
-    ) {
       raw = raw[0];
       continue;
     }
     break;
   }
-  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+  return raw && typeof raw === "object" && !isArrayLike(raw) ? normalizeModuleValue(raw) : null;
 }
 
 export function isPort8080Url(url) {
@@ -722,8 +754,11 @@ export function extractSvgCanvasOps(rawSvg, defaultFill, classFills) {
 }
 
 // Draws a sanitized `kind: "svg"` block onto a QtQuick Canvas 2D context (zero QtSvg dependency).
+// Accepts both JS Arrays and Qt QVariantList array-like objects for `block.ops`.
 export function drawSvgToCanvas(ctx, block, canvasW, canvasH) {
-  if (!ctx || !block || !Array.isArray(block.ops) || canvasW <= 0 || canvasH <= 0) return;
+  if (!ctx || !block || canvasW <= 0 || canvasH <= 0) return;
+  const ops = toArray(block.ops);
+  if (ops.length === 0) return;
   const vbX = Number(block.vb_x || 0) || 0;
   const vbY = Number(block.vb_y || 0) || 0;
   const vbW = Number(block.vb_w || 0) > 0 ? Number(block.vb_w) : 100;
@@ -734,18 +769,18 @@ export function drawSvgToCanvas(ctx, block, canvasW, canvasH) {
   ctx.scale(canvasW / vbW, canvasH / vbH);
   if (vbX !== 0 || vbY !== 0) ctx.translate(-vbX, -vbY);
 
-  for (let i = 0; i < block.ops.length; i++) {
-    const item = block.ops[i];
+  for (let i = 0; i < ops.length; i++) {
+    const item = ops[i];
     if (!item || !item.fill) continue;
     ctx.save();
-    ctx.globalAlpha = typeof item.opacity === "number" ? item.opacity : 1;
+    ctx.globalAlpha = item.opacity !== undefined && item.opacity !== null && !isNaN(Number(item.opacity)) ? Number(item.opacity) : 1;
     ctx.fillStyle = item.fill;
 
     if (item.op === "rect") {
-      ctx.fillRect(item.x || 0, item.y || 0, item.w || 0, item.h || 0);
+      ctx.fillRect(Number(item.x || 0) || 0, Number(item.y || 0) || 0, Number(item.w || 0) || 0, Number(item.h || 0) || 0);
     } else if (item.op === "circle") {
       ctx.beginPath();
-      ctx.arc(item.x || 0, item.y || 0, item.r || 0, 0, Math.PI * 2);
+      ctx.arc(Number(item.x || 0) || 0, Number(item.y || 0) || 0, Number(item.r || 0) || 0, 0, Math.PI * 2);
       ctx.fill();
     } else if (item.op === "polygon" && item.points) {
       const nums = String(item.points).match(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi) || [];
@@ -759,7 +794,9 @@ export function drawSvgToCanvas(ctx, block, canvasW, canvasH) {
         ctx.fill();
       }
     } else if (item.op === "path" && item.d) {
-      if (item.x || item.y) ctx.translate(item.x || 0, item.y || 0);
+      const ox = Number(item.x || 0) || 0;
+      const oy = Number(item.y || 0) || 0;
+      if (ox || oy) ctx.translate(ox, oy);
       traceSvgPath(ctx, item.d);
       ctx.fill();
     }

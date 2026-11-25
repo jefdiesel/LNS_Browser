@@ -47,7 +47,7 @@ Item {
     // Active storage_module async download / upload state
     property var activeDownload: null  // { cid, expectedSha256, siteBase, path, chunks, manifestRoot }
     property var activeUpload: null    // { sessionId, name, sha256, mode, sentChunk }
-    property var pendingResolve: null  // { seq, name, attempt, onResult, onError }
+    property var pendingResolve: null  // { seq, method, name, attempt, onResult, onError }
     property int resolveSeq: 0
 
     property bool settingsOpen: false
@@ -301,17 +301,26 @@ Item {
         }, timeoutMs || 30000)
     }
 
-    function resolveNameWithRetry(name, onResult, onError) {
+    function callNamesWithRetry(method, name, onResult, onError) {
         resolveRetryTimer.stop()
         resolveSeq += 1
         pendingResolve = {
             seq: resolveSeq,
+            method: method,
             name: name,
             attempt: 0,
             onResult: onResult,
             onError: onError
         }
         runPendingResolve()
+    }
+
+    function resolveNameWithRetry(name, onResult, onError) {
+        callNamesWithRetry("resolve", name, onResult, onError)
+    }
+
+    function pageNameWithRetry(name, onResult, onError) {
+        callNamesWithRetry("page", name, onResult, onError)
     }
 
     function runPendingResolve() {
@@ -323,24 +332,29 @@ Item {
             return
         }
         var seq = req.seq
-        logos.callModuleAsync("names", "resolve", [req.name], function(reply) {
+        logos.callModuleAsync("names", req.method, [req.name], function(reply) {
             if (pendingResolve === null || pendingResolve.seq !== seq) return
             var res = Logic.answer(reply)
+            if (Logic.isBusyReply(reply, res.ok ? "" : res.error)) {
+                if (req.attempt < 20) {
+                    req.attempt += 1
+                    console.log("lns_browser: names." + req.method + " busy for", req.name, "retrying", req.attempt, "/ 20")
+                    notice = "Names is busy — retrying (" + req.attempt + "/20)..."
+                    resolveRetryTimer.restart()
+                    return
+                }
+                pendingResolve = null
+                req.onError("Names module stayed busy after 20 retries (" + req.method + ").")
+                return
+            }
             if (res.ok) {
                 pendingResolve = null
                 req.onResult(res.value)
                 return
             }
-            if (Logic.isBusyReply(reply, res.error) && req.attempt < 20) {
-                req.attempt += 1
-                console.log("lns_browser: names.resolve busy for", req.name, "retrying", req.attempt, "/ 20")
-                notice = "Names is busy — retrying (" + req.attempt + "/20)..."
-                resolveRetryTimer.restart()
-                return
-            }
             var rawStr = ""
             try { rawStr = typeof reply === "string" ? reply : JSON.stringify(reply) } catch (e) { rawStr = String(reply) }
-            console.log("lns_browser: names.resolve failed:", res.error, "(raw=" + rawStr + ")")
+            console.log("lns_browser: names." + req.method + " failed:", res.error, "(raw=" + rawStr + ")")
             pendingResolve = null
             req.onError(res.error)
         }, 30000)
@@ -577,6 +591,7 @@ Item {
     }
 
     function renderHtmlSafely(rawHtml, meta) {
+        var normFiles = Logic.toArray(meta.files)
         callCore("lns_browser_core", "render_html", [rawHtml, meta.siteBase, meta.path || "/"], function(rendered) {
             loading = false
             pageData = Object.assign({}, rendered, {
@@ -584,9 +599,10 @@ Item {
                 cid: meta.cid || "",
                 sha256: meta.sha256 || "",
                 verified: !!meta.verified,
-                files: meta.files || []
+                blocks: Logic.toArray(rendered && rendered.blocks),
+                files: normFiles
             })
-            filesOpen = !!(meta.files && meta.files.length > 1)
+            filesOpen = normFiles.length > 1
         }, function() {
             // Older lns_browser_core without render_html: use safe JS fallback with colors + SVG + https://
             var clean = Logic.sanitizeHtmlFallback(rawHtml, meta.siteBase)
@@ -603,10 +619,10 @@ Item {
                 bg_color: clean.bg_color,
                 fg_color: clean.fg_color,
                 link_color: clean.link_color,
-                blocks: clean.blocks,
-                files: meta.files || []
+                blocks: Logic.toArray(clean.blocks),
+                files: normFiles
             }
-            filesOpen = !!(meta.files && meta.files.length > 1)
+            filesOpen = normFiles.length > 1
         })
     }
 
@@ -728,8 +744,8 @@ Item {
                 fetchCidPage(info.cid, info.sha256, parsed.siteBase, parsed.path)
                 return
             }
-            // Fallback: on-chain SetPage HTML stored directly on LEZ 0.4
-            callCore("names", "page", [parsed.name], function(pg) {
+            // Fallback: on-chain SetPage HTML stored directly on LEZ 0.4 (retry on busy:true like names.resolve)
+            pageNameWithRetry(parsed.name, function(pg) {
                 if (pg && pg.text && pg.text.length > 0) {
                     renderHtmlSafely(pg.text, {
                         mode: "onchain-page",
@@ -745,9 +761,10 @@ Item {
                     loading = false
                     pageData = null
                 }
-            }, function() {
+            }, function(err) {
                 loading = false
                 pageData = null
+                if (err && String(err).toLowerCase().indexOf("busy") !== -1) problem = err
             })
         }, function(err) {
             loading = false
@@ -777,7 +794,7 @@ Item {
             callCore("lns_browser_core", "fetch_site", [cid, expectedSha256 || "", siteBase, path || "/"], function(data) {
                 loading = false
                 pageData = data
-                filesOpen = data && data.files && data.files.length > 1
+                filesOpen = Logic.toArray(data && data.files).length > 1
             }, function(err) {
                 loading = false
                 pageData = null
@@ -1322,7 +1339,7 @@ Item {
                 spacing: px(12)
 
                 Rectangle {
-                    visible: root.filesOpen && !!root.pageData && root.pageData.files && root.pageData.files.length > 0
+                    visible: root.filesOpen && !!root.pageData && Logic.toArray(root.pageData.files).length > 0
                     Layout.preferredWidth: px(210)
                     Layout.fillHeight: true
                     radius: px(10); color: root.card; border.color: root.line
@@ -1333,7 +1350,7 @@ Item {
 
                         ListView {
                             Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: px(4)
-                            model: (root.pageData && root.pageData.files) ? root.pageData.files : []
+                            model: root.pageData ? Logic.toArray(root.pageData.files) : []
                             delegate: Rectangle {
                                 width: ListView.view.width; height: px(28); radius: px(6)
                                 color: (root.pageData && root.pageData.path === modelData.path) ? root.raised : "transparent"
@@ -1386,8 +1403,8 @@ Item {
                             }
 
                             Repeater {
-                                model: (root.pageData && root.pageData.blocks && root.pageData.blocks.length > 0)
-                                    ? root.pageData.blocks
+                                model: (root.pageData && Logic.toArray(root.pageData.blocks).length > 0)
+                                    ? Logic.toArray(root.pageData.blocks)
                                     : (root.pageData && root.pageData.html ? [{ kind: "html", html: root.pageData.html }] : [])
 
                                 delegate: Item {
@@ -1399,6 +1416,7 @@ Item {
 
                                     Canvas {
                                         id: svgCanvas
+                                        property var svgBlock: modelData
                                         visible: modelData.kind === "svg"
                                         width: Math.min(parent.width, modelData.width ? px(modelData.width) : parent.width)
                                         height: (modelData.vb_w && modelData.vb_h && modelData.vb_w > 0)
@@ -1406,10 +1424,12 @@ Item {
                                             : px(100)
                                         renderStrategy: Canvas.Cooperative
                                         onPaint: {
-                                            if (modelData.kind !== "svg") return
+                                            if (!visible || !modelData || modelData.kind !== "svg") return
                                             var ctx = getContext("2d")
                                             Logic.drawSvgToCanvas(ctx, modelData, width, height)
                                         }
+                                        onAvailableChanged: if (available && visible) requestPaint()
+                                        onSvgBlockChanged: if (visible) requestPaint()
                                         onWidthChanged: if (visible) requestPaint()
                                         onHeightChanged: if (visible) requestPaint()
                                         Component.onCompleted: if (visible) requestPaint()

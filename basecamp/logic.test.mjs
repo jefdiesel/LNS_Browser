@@ -10,10 +10,12 @@ import {
   drawSvgToCanvas,
   extractSiteInfo,
   formatUnreachableCidError,
+  isArrayLike,
   isBusyReply,
   isExternalHttpsUrl,
   isPort8080Url,
   isValidName,
+  normalizeModuleValue,
   normalizeName,
   parseStorageEventPayload,
   parseStoragePeers,
@@ -21,6 +23,7 @@ import {
   sanitizeHtmlFallback,
   sha256HexUtf8,
   shortHash,
+  toArray,
   utf8ToBytes,
 } from "./qml/logic.mjs";
 
@@ -236,4 +239,82 @@ test("storage_module helpers: sha256, base64, port 8080 check, unreachable CID e
     success: true,
   });
   assert.equal(parseStorageEventPayload([]), null);
+});
+
+test("Qt QVariantList-like objects (Array.isArray === false) work across drawSvgToCanvas, answer(), and toArray()", () => {
+  const qOps = {
+    0: { op: "path", d: "M0 0h2v4h-2z", x: 0.5, y: 0.5, fill: "#b8d0ff", opacity: 1 },
+    1: { op: "rect", x: 4, y: 1, w: 3, h: 5, fill: "#0055ff", opacity: 0.9 },
+    2: { op: "circle", x: 10, y: 4, r: 2, fill: "#e8662f", opacity: 1 },
+    length: 3,
+  };
+  assert.equal(Array.isArray(qOps), false);
+  assert.equal(isArrayLike(qOps), true);
+  assert.equal(toArray(qOps).length, 3);
+  assert.equal(isArrayLike({ length: 0 }), true);
+  assert.equal(isArrayLike({ kind: "svg", length: 5 }), false);
+  assert.equal(isArrayLike("not-a-list"), false);
+  assert.equal(isArrayLike(null), false);
+
+  // drawSvgToCanvas must render when block.ops is a QVariantList-like object (not a JS Array)
+  const qBlock = {
+    kind: "svg",
+    vb_x: 0,
+    vb_y: 0,
+    vb_w: 20,
+    vb_h: 10,
+    width: 200,
+    height: 100,
+    ops: qOps,
+  };
+  const calls = [];
+  const mockCtx = {
+    globalAlpha: 1,
+    fillStyle: "",
+    clearRect: (...a) => calls.push(["clearRect", ...a]),
+    save: () => calls.push(["save"]),
+    restore: () => calls.push(["restore"]),
+    scale: (...a) => calls.push(["scale", ...a]),
+    translate: (...a) => calls.push(["translate", ...a]),
+    beginPath: () => calls.push(["beginPath"]),
+    moveTo: (...a) => calls.push(["moveTo", ...a]),
+    lineTo: (...a) => calls.push(["lineTo", ...a]),
+    closePath: () => calls.push(["closePath"]),
+    fill: () => calls.push(["fill", mockCtx.fillStyle]),
+    fillRect: (...a) => calls.push(["fillRect", mockCtx.fillStyle, ...a]),
+    arc: (...a) => calls.push(["arc", ...a]),
+  };
+  drawSvgToCanvas(mockCtx, qBlock, 200, 100);
+  assert.deepEqual(calls.filter((c) => c[0] === "fill"), [
+    ["fill", "#b8d0ff"],
+    ["fill", "#e8662f"],
+  ]);
+  assert.deepEqual(calls.filter((c) => c[0] === "fillRect"), [
+    ["fillRect", "#0055ff", 4, 1, 3, 5],
+  ]);
+
+  // answer() recursively converts nested QVariantList-like blocks, ops, files, and peers into real JS Arrays
+  const qReply = {
+    success: true,
+    value: {
+      blocks: { 0: qBlock, length: 1 },
+      files: { 0: { path: "/index.html", cid: "zCid1" }, length: 1 },
+      peers: { 0: "16Uiu2HAmTest", length: 1 },
+    },
+  };
+  assert.equal(Array.isArray(qReply.value.blocks), false);
+  assert.equal(Array.isArray(qReply.value.blocks[0].ops), false);
+  const unwrapped = answer(qReply);
+  assert.equal(unwrapped.ok, true);
+  assert.equal(Array.isArray(unwrapped.value.blocks), true);
+  assert.equal(Array.isArray(unwrapped.value.blocks[0].ops), true);
+  assert.equal(unwrapped.value.blocks[0].ops.length, 3);
+  assert.equal(Array.isArray(unwrapped.value.files), true);
+  assert.equal(Array.isArray(unwrapped.value.peers), true);
+
+  // Bare { busy: true } replies (as returned by names.resolve and names.page) are detected as busy
+  assert.equal(isBusyReply({ busy: true }, ""), true);
+  assert.equal(isBusyReply(JSON.stringify({ busy: true }), ""), true);
+  assert.equal(isBusyReply({ success: true, value: { busy: true } }, ""), true);
+  assert.equal(normalizeModuleValue({ length: 0 }).length, 0);
 });
