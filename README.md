@@ -33,9 +33,11 @@ node src/cli.js resolve lns://jef
 npm test
 ```
 
-## Basecamp Module (`basecamp/`)
+## Basecamp App (`basecamp/` v0.2.4 + `basecamp-module/` v0.1.4)
 
-`basecamp/` is a `ui_qml` Basecamp app (`lns_browser`) built with `logos-module-builder`:
-- Depends on the `names` core module (`>=0.10.0`).
-- Provides the `lns.browse` intent (`web: true`).
-- Resolves `lns://` URLs via `logos.callModuleAsync("names", "resolve", ...)`, inspects the on-chain CID + SHA-256, lets name owners bind a new CID via `set_profile`, and opens the verified site in the local loopback browser.
+- `lns_browser` (`ui_qml`) + `lns_browser_core` (Rust core module) built with `logos-module-builder`.
+- Resolves `lns://` URLs via `names.resolve` and on-chain `SetPage` HTML (`names.page`, ≤ 78 KB) on LEZ 0.4.
+- Uses Basecamp's built-in `storage_module` when installed (never defaults to port `8080`, which belongs to the Logos Blockchain node), with a local **Storage peers** setting (`~/.config/lns-browser/config.json`) connecting via `lns_browser_core.storage_connect_peer` (real `Vec<String>` over `logos-rust-sdk`) as a workaround for upstream Logos Storage discovery (#1556). When no Storage module is installed, says so plainly and defaults Publish to **On-Chain HTML (≤ 78 KB)**.
+- Renders pages natively with zero JS and zero external subresources: safe colors, **SVG-as-Canvas** (`Canvas` + structured ops, zero QtSvg dependency), click-to-confirm `https://` links (**Open in Browser** via `lns_browser_core.open_external_url` + **Copy Link**).
+- Publishes via Basecamp's `names.publish_site` intent so Names verifies ownership and asks for a single-click approval before signing.
+- Includes a zero-dependency WYSIWYG Site Builder at `http://127.0.0.1:7777/editor` (`src/ui/editor.html`) and AI agent authoring guide in [`AGENT.md`](./AGENT.md).
