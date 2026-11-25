@@ -152,7 +152,7 @@ Item {
                 peerConnectTimeoutTimer.stop()
                 var q = root.peerConnectQueue
                 var peer = q.peers[q.idx]
-                if (payload.success) {
+                if (payload.success === true) {
                     console.log("lns_browser: storageConnect ok for", peer.peerId, JSON.stringify(payload))
                     q.connected += 1
                 } else {
@@ -398,6 +398,7 @@ Item {
                 problem = errMsg
             } else {
                 peerConnectStatus = "Connected to " + q.connected + " storage peer" + (q.connected === 1 ? "" : "s")
+                problem = ""
             }
             if (q.onDone) q.onDone(q.errors.length === 0 || q.connected > 0, errMsg)
             return

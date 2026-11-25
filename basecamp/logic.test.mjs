@@ -14,6 +14,7 @@ import {
   isPort8080Url,
   isValidName,
   normalizeName,
+  parseStorageEventPayload,
   parseStoragePeers,
   parseUrl,
   sanitizeHtmlFallback,
@@ -200,4 +201,28 @@ test("storage_module helpers: sha256, base64, port 8080 check, unreachable CID e
   const peersBad = parseStoragePeers("short /ip4/1.2.3.4/tcp/8070\n16Uiu2HAm3xPbYz2zsq5XVGDCMqKhhNXZWyYV6WLVv3yzzUiRJWnW not-a-multiaddr");
   assert.equal(peersBad.ok, false);
   assert.equal(peersBad.errors.length, 2);
+
+  // Exact Basecamp storageConnect / storage_* event payload shapes (Array, Qt QVariantList-like, and JSON string)
+  assert.deepEqual(parseStorageEventPayload(["{\"message\":\"\",\"success\":true}"]), {
+    message: "",
+    success: true,
+  });
+  // Qt QML QVariantList where Array.isArray() is false
+  const qVariantList = { 0: "{\"message\":\"\",\"success\":true}", length: 1 };
+  assert.equal(Array.isArray(qVariantList), false);
+  assert.deepEqual(parseStorageEventPayload(qVariantList), {
+    message: "",
+    success: true,
+  });
+  // Double-encoded stringified array
+  assert.deepEqual(parseStorageEventPayload(JSON.stringify(["{\"sessionId\":\"zCid123\",\"success\":true}"])), {
+    sessionId: "zCid123",
+    success: true,
+  });
+  assert.deepEqual(parseStorageEventPayload(["{\"sessionId\":\"zCid123\",\"chunk\":\"SGVsbG8=\",\"success\":true}"]), {
+    sessionId: "zCid123",
+    chunk: "SGVsbG8=",
+    success: true,
+  });
+  assert.equal(parseStorageEventPayload([]), null);
 });

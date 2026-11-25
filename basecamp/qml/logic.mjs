@@ -44,15 +44,37 @@ export function answer(reply) {
 
 export function parseStorageEventPayload(data) {
   let raw = data;
-  if (Array.isArray(raw) && raw.length > 0) raw = raw[0];
-  if (typeof raw === "string") {
-    try {
-      return JSON.parse(raw);
-    } catch (e) {
-      return null;
+  // Unwrap Qt QVariantList (array-like object where Array.isArray can be false in QV4),
+  // real JS Arrays, and single/double-encoded JSON strings, e.g. ["{\"message\":\"\",\"success\":true}"].
+  for (let depth = 0; depth < 4; depth++) {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw === "string") {
+      try {
+        raw = JSON.parse(raw);
+        continue;
+      } catch (e) {
+        return null;
+      }
     }
+    if (Array.isArray(raw)) {
+      if (raw.length === 0) return null;
+      raw = raw[0];
+      continue;
+    }
+    if (
+      typeof raw === "object" &&
+      typeof raw.length === "number" &&
+      raw.length > 0 &&
+      raw[0] !== undefined &&
+      raw.success === undefined &&
+      raw.sessionId === undefined
+    ) {
+      raw = raw[0];
+      continue;
+    }
+    break;
   }
-  return raw && typeof raw === "object" ? raw : null;
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
 }
 
 export function isPort8080Url(url) {
