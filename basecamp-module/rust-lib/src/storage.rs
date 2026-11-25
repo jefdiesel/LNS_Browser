@@ -314,16 +314,42 @@ impl StorageClient {
         self.assert_real_storage_node()?;
         let safe_name: String = filename
             .chars()
-            .map(|c| if matches!(c, '"' | '\r' | '\n' | '/' | '\\') { '_' } else { c })
+            .map(|c| {
+                if c.is_ascii()
+                    && (0x20..=0x7e).contains(&(c as u8))
+                    && !matches!(c, '"' | '/' | '\\')
+                {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
+        let safe_name = if safe_name.is_empty() {
+            "blob".to_owned()
+        } else {
+            safe_name
+        };
         let bare_mime = bare_mime_type(mime);
-        let resp = self
-            .agent
-            .post(&format!("{}/data", self.base))
-            .set("Content-Type", bare_mime)
-            .set("Content-Disposition", &format!("attachment; filename=\"{safe_name}\""))
-            .send_bytes(bytes)
-            .map_err(|e| format!("Storage upload failed: {e}"))?;
+        let url = format!("{}/data", self.base);
+        let disposition = format!("attachment; filename=\"{safe_name}\"");
+
+        let send = |ct: &str| {
+            self.agent
+                .post(&url)
+                .set("Content-Type", ct)
+                .set("Content-Disposition", &disposition)
+                .send_bytes(bytes)
+        };
+
+        let resp = match send(bare_mime) {
+            Ok(r) => r,
+            Err(ureq::Error::Status(422 | 415, _)) if bare_mime != "application/octet-stream" => {
+                send("application/octet-stream")
+                    .map_err(|e| format!("Storage upload failed: {e}"))?
+            }
+            Err(e) => return Err(format!("Storage upload failed: {e}")),
+        };
         let cid = resp
             .into_string()
             .map_err(|e| format!("Storage upload bad reply: {e}"))?
@@ -424,4 +450,95 @@ fn walk_dir(root: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> (String, String, String) {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        let header_end = loop {
+            let n = stream.read(&mut tmp).unwrap();
+            if n == 0 {
+                break buf.len();
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let header_str = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+        let first_line = header_str.lines().next().unwrap_or("").to_owned();
+        let mut content_len = 0usize;
+        let mut content_type = String::new();
+        for line in header_str.lines().skip(1) {
+            if let Some((k, v)) = line.split_once(':') {
+                if k.eq_ignore_ascii_case("content-length") {
+                    content_len = v.trim().parse().unwrap_or(0);
+                } else if k.eq_ignore_ascii_case("content-type") {
+                    content_type = v.trim().to_owned();
+                }
+            }
+        }
+        while buf.len() < header_end + content_len {
+            let n = stream.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        (first_line, content_type, header_str)
+    }
+
+    #[test]
+    fn upload_falls_back_to_octet_stream_on_422_and_415() {
+        for reject_status in [422u16, 415u16] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = thread::spawn(move || {
+                let mut seen_types = Vec::new();
+                for _ in 0..3 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let (first_line, ct, _headers) = read_http_request(&mut stream);
+                    let (status, body) = if first_line.starts_with("GET /debug/info") {
+                        ("200 OK", r#"{"id":"16Uiu2HAmRealTestNode1111111111111111111111"}"#)
+                    } else if first_line.starts_with("POST /data") {
+                        seen_types.push(ct.clone());
+                        if ct != "application/octet-stream" {
+                            if reject_status == 422 {
+                                ("422 Unprocessable Entity", "unsupported mime")
+                            } else {
+                                ("415 Unsupported Media Type", "unsupported mime")
+                            }
+                        } else {
+                            ("200 OK", "z4W2jFallbackUpload00000000000000000000000000")
+                        }
+                    } else {
+                        ("404 Not Found", "missing")
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(resp.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                }
+                seen_types
+            });
+
+            let client = StorageClient::new(&format!("http://{addr}"));
+            let (cid, hash) = client
+                .upload("café.css", "text/css; charset=utf-8", b"body{color:#111}")
+                .unwrap();
+            assert_eq!(cid, "z4W2jFallbackUpload00000000000000000000000000");
+            assert_eq!(hash, sha256_hex(b"body{color:#111}"));
+            let seen = handle.join().unwrap();
+            assert_eq!(seen, vec!["text/css", "application/octet-stream"]);
+        }
+    }
 }

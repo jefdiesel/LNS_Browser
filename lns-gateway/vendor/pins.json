@@ -1,0 +1,4 @@
+{
+  "policy": "Browser code uses WebCrypto; Argon2id comes from ONE vendored, audited, dependency-free file with its license and SHA-256 pin checked by tests. No npm. lns-gateway v1 ships no browser JS (all snapshots enforce script-src 'none').",
+  "files": []
+}

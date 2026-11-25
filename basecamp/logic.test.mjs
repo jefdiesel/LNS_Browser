@@ -2,29 +2,74 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   answer,
+  base64DecodedLength,
   base64ToBytes,
+  buildLoopbackEntryUrl,
   buildProfileEntries,
   buildPublishDeepLink,
+  buildSaveTargetPath,
   bytesToBase64,
   bytesToUtf8,
+  bytesToUtf8Strict,
+  canTabGoBack,
+  canTabGoForward,
+  clampWindowGeometry,
+  clampZoomPercent,
+  classifyWebViewUrl,
+  closeTabState,
+  cmpCodePoint,
+  countTextMatches,
+  createSafeMap,
+  createTab,
   drawSvgToCanvas,
+  escapeHtml,
+  extractRecentSites,
   extractSiteInfo,
+  extractSvgCanvasOps,
+  findPinnedSha256,
+  formatLinksList,
+  formatStorageFetchError,
+  formatTabTitle,
   formatUnreachableCidError,
+  formatWindowTitle,
+  getCachedImageEntry,
+  getCachedLinksEntry,
   isArrayLike,
+  isBinaryDownloadPath,
+  isBookmarked,
   isBusyReply,
   isExternalHttpsUrl,
+  isLinksContentType,
+  isLinksListText,
   isPort8080Url,
+  isStaleDownload,
   isValidName,
+  isValidSegmentName,
+  MAX_LINKS_ENTRIES,
+  MAX_LINKS_LIST_BYTES,
   normalizeModuleValue,
   normalizeName,
+  normalizePath,
+  parseLinksList,
+  parseQueryString,
   parseStorageEventPayload,
   parseStoragePeers,
   parseUrl,
+  pushTabHistory,
+  recordHistoryEntry,
+  resolveLinksSync,
+  resolveRelativeSitePath,
+  safeMapSet,
   sanitizeHtmlFallback,
   sha256HexUtf8,
   shortHash,
+  sitePathFromLoopbackUrl,
+  sniffImageMimeBytes,
+  stepLinksResolve,
   toArray,
+  toggleBookmark,
   utf8ToBytes,
+  validateSaveFilename,
 } from "./qml/logic.mjs";
 
 test("parseUrl normalizes lns://, .lez, @name, and cid:// without ES2018 lookbehind", () => {
@@ -317,4 +362,467 @@ test("Qt QVariantList-like objects (Array.isArray === false) work across drawSvg
   assert.equal(isBusyReply(JSON.stringify({ busy: true }), ""), true);
   assert.equal(isBusyReply({ success: true, value: { busy: true } }, ""), true);
   assert.equal(normalizeModuleValue({ length: 0 }).length, 0);
+});
+
+test("parseUrl supports bare name/path, query/fragment, normalization, and rejects subnames/control chars", () => {
+  assert.deepEqual(parseUrl("nameswallet/browser"), {
+    ok: true,
+    kind: "lns",
+    name: "nameswallet",
+    path: "/browser",
+    siteBase: "lns://nameswallet",
+    canonical: "lns://nameswallet/browser",
+  });
+  assert.deepEqual(parseUrl("nameswallet/browser/files/x.lgx"), {
+    ok: true,
+    kind: "lns",
+    name: "nameswallet",
+    path: "/browser/files/x.lgx",
+    siteBase: "lns://nameswallet",
+    canonical: "lns://nameswallet/browser/files/x.lgx",
+  });
+  assert.deepEqual(parseUrl("nameswallet/a/../browser/?v=2#dl"), {
+    ok: true,
+    kind: "lns",
+    name: "nameswallet",
+    path: "/browser/",
+    siteBase: "lns://nameswallet",
+    canonical: "lns://nameswallet/browser/",
+    fragment: "#dl",
+  });
+  assert.deepEqual(parseUrl("nameswallet/../../etc/passwd"), {
+    ok: true,
+    kind: "lns",
+    name: "nameswallet",
+    path: "/etc/passwd",
+    siteBase: "lns://nameswallet",
+    canonical: "lns://nameswallet/etc/passwd",
+  });
+  assert.equal(parseUrl("sub.nameswallet/browser").ok, false);
+  assert.equal(parseUrl("nameswallet/bad\0path").ok, false);
+  assert.equal(parseUrl("nameswallet/bad\npath").ok, false);
+  assert.equal(normalizePath("/browser/./shot.png?x=1#top").path, "/browser/shot.png");
+  assert.equal(resolveRelativeSitePath("./shot.png", "/browser/index.html"), "/browser/shot.png");
+  assert.equal(resolveRelativeSitePath("../assets/site.css", "/browser/index.html"), "/assets/site.css");
+  assert.equal(resolveRelativeSitePath("/bridge/", "/browser/index.html"), "/bridge/");
+});
+
+test("per-folder lns-links/1 parser, formatter, rejection rules, and nested resolver", () => {
+  const cidHome = "z4W2jHomeHtml00000000000000000000000000000000000";
+  const cidBrowserDir = "z4W2jBrowserDir000000000000000000000000000000000";
+  const cidBrowserHtml = "z4W2jBrowserHtml00000000000000000000000000000000";
+  const cidShot = "z4W2jShotPng000000000000000000000000000000000000";
+  const cidFilesDir = "z4W2jFilesDir00000000000000000000000000000000000";
+  const cidLgx = "z4W2jBrowserLgx000000000000000000000000000000000";
+  const hashLgx = "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b";
+
+  const rootText = [
+    "# lns-links/1",
+    "# title Names Wallet",
+    "# index index.html",
+    "",
+    "# comment line",
+    `index.html ${cidHome}`,
+    `browser/ ${cidBrowserDir}`,
+    "",
+  ].join("\n");
+
+  assert.equal(isLinksListText(rootText), true);
+  assert.equal(isLinksListText("<html><body>hi</body></html>"), false);
+  assert.equal(isLinksContentType("text/vnd.logos.lns-links; version=1"), true);
+  assert.equal(isLinksContentType("text/html; charset=utf-8"), false);
+
+  const rootList = parseLinksList(rootText);
+  assert.equal(rootList.ok, true);
+  assert.equal(rootList.title, "Names Wallet");
+  assert.equal(rootList.index, "index.html");
+  assert.deepEqual(
+    rootList.entries.map((e) => [e.name, e.kind]),
+    [
+      ["browser", "dir"],
+      ["index.html", "file"],
+    ],
+  );
+
+  // Formatting is deterministic and round-trips cleanly
+  const formatted = formatLinksList(rootList);
+  assert.equal(formatted.ok, true);
+  assert.equal(
+    formatted.text,
+    `# lns-links/1\n# title Names Wallet\n# index index.html\nbrowser/ ${cidBrowserDir}\nindex.html ${cidHome}\n`,
+  );
+  assert.deepEqual(parseLinksList(formatted.text), rootList);
+
+  // Reject bad header, bad lines, invalid CID/hash, duplicates, file/dir collision, traversal, control chars
+  assert.equal(parseLinksList("index.html " + cidHome).ok, false);
+  assert.equal(parseLinksList("# lns-links/2\n").ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\nonlyone\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\na.html ${cidHome} ${hashLgx} extra\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\na.html bad!cid\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\na.html ${cidHome} nothex\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\na.html ${cidHome}\na.html ${cidShot}\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\nbrowser ${cidHome}\nbrowser/ ${cidBrowserDir}\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\n.. ${cidHome}\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\n. ${cidHome}\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\nsub/a.html ${cidHome}\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\n/a.html ${cidHome}\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\n# index ../bad\n`).ok, false);
+  assert.equal(parseLinksList(`# lns-links/1\na\0b ${cidHome}\n`).ok, false);
+
+  // Walk nested folders with CID cache
+  const browserList = parseLinksList(
+    `# lns-links/1\n# index index.html\nfiles/ ${cidFilesDir}\nindex.html ${cidBrowserHtml}\nshot.png ${cidShot}\n`,
+  );
+  const filesList = parseLinksList(`# lns-links/1\nlns-browser-0.2.8.lgx ${cidLgx} ${hashLgx}\n`);
+  const store = {};
+  store[cidBrowserDir] = browserList;
+  store[cidFilesDir] = filesList;
+
+  const cache = {};
+  let loads = 0;
+  function loadFolder(cid) {
+    loads += 1;
+    return store[cid] || { ok: false, error: "not found" };
+  }
+
+  // Root `/`
+  const rRoot = resolveLinksSync(rootList, "/", loadFolder, cache);
+  assert.equal(rRoot.ok, true);
+  assert.equal(rRoot.entry.cid, cidHome);
+  assert.equal(rRoot.resolvedPath, "/index.html");
+  assert.equal(rRoot.canonicalUrlPath, "/");
+  assert.equal(loads, 0);
+
+  // Folder without trailing slash -> canonicalized with trailing `/`
+  const rBrowser = resolveLinksSync(rootList, "/browser", loadFolder, cache);
+  assert.equal(rBrowser.ok, true);
+  assert.equal(rBrowser.entry.cid, cidBrowserHtml);
+  assert.equal(rBrowser.resolvedPath, "/browser/index.html");
+  assert.equal(rBrowser.canonicalUrlPath, "/browser/");
+  assert.equal(loads, 1);
+
+  // Nested file reuses cached `browser/` list
+  const rLgx = resolveLinksSync(rootList, "/browser/files/lns-browser-0.2.8.lgx", loadFolder, cache);
+  assert.equal(rLgx.ok, true);
+  assert.equal(rLgx.entry.cid, cidLgx);
+  assert.equal(rLgx.entry.sha256, hashLgx);
+  assert.equal(rLgx.resolvedPath, "/browser/files/lns-browser-0.2.8.lgx");
+  assert.equal(rLgx.canonicalUrlPath, "/browser/files/lns-browser-0.2.8.lgx");
+  assert.equal(loads, 2);
+
+  // Exact file with trailing slash -> not_found
+  const rBadSlash = resolveLinksSync(rootList, "/browser/shot.png/", loadFolder, cache);
+  assert.equal(rBadSlash.ok, false);
+  assert.equal(rBadSlash.status, "not_found");
+
+  // Directory without index file -> not_found (isDirectory = true)
+  const rNoIdx = resolveLinksSync(rootList, "/browser/files/", loadFolder, cache);
+  assert.equal(rNoIdx.ok, false);
+  assert.equal(rNoIdx.status, "not_found");
+  assert.equal(rNoIdx.isDirectory, true);
+
+  // Missing path -> not_found
+  const rMissing = resolveLinksSync(rootList, "/missing/page.html", loadFolder, cache);
+  assert.equal(rMissing.ok, false);
+  assert.equal(rMissing.status, "not_found");
+
+  // stepLinksResolve directly
+  assert.equal(stepLinksResolve(rootList, ["browser"], 0, false).action, "fetch_dir");
+});
+
+test("sanitizeHtmlFallback extracts cid:// and relative <img> blocks, downloads, and formats storage fetch errors", () => {
+  const html =
+    '<html><body>' +
+    '<p><a href="./guide.html">Guide</a></p>' +
+    '<img src="cid://z4W2jBrowserShot0000000000000000000000000000000000" alt="Shot">' +
+    '<img src="./icon.png" alt="Icon">' +
+    '<img src="https://evil.example/track.png" alt="Blocked">' +
+    '<a href="cid://z4W2jBrowserUiLgx00000000000000000000000000000000" download="lns-browser-0.2.8.lgx">Download UI</a>' +
+    '</body></html>';
+  const clean = sanitizeHtmlFallback(html, "lns://nameswallet", "/browser/index.html");
+  assert.match(clean.html, /href="lns:\/\/nameswallet\/browser\/guide\.html"/);
+  const imgs = clean.blocks.filter((b) => b.kind === "image");
+  assert.equal(imgs.length, 2);
+  assert.equal(imgs[0].src_cid, "z4W2jBrowserShot0000000000000000000000000000000000");
+  assert.equal(imgs[1].src_path, "/browser/icon.png");
+  assert.equal(clean.downloads.length, 1);
+  assert.equal(clean.downloads[0].filename, "lns-browser-0.2.8.lgx");
+  assert.equal(clean.downloads[0].cid, "z4W2jBrowserUiLgx00000000000000000000000000000000");
+
+  assert.equal(isBinaryDownloadPath("/browser/files/lns-browser-0.2.8.lgx"), true);
+  assert.equal(isBinaryDownloadPath("/browser/index.html"), false);
+  assert.equal(sniffImageMimeBytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), "image/png");
+  assert.equal(sniffImageMimeBytes([0xff, 0xd8, 0xff, 0xe0]), "image/jpeg");
+
+  const errMsg = formatStorageFetchError("z4W2jBrowserHtml00000000000000000000000000000000", "/browser/", "HTTP 404");
+  assert.match(errMsg, /\/browser\//);
+  assert.match(errMsg, /z4W2jBrowser/);
+});
+
+test("Finding 4 & 5: escapeHtml, save filename/path validation (no /tmp fallback), and pinned sha256 lookup", () => {
+  // Finding 4: binary filename HTML escaping
+  assert.equal(escapeHtml("<b><i>SPOOFED.lgx"), "&lt;b&gt;&lt;i&gt;SPOOFED.lgx");
+
+  // Finding 5: reject `.`, `..`, leading dot, control chars, separators
+  assert.equal(validateSaveFilename(".").ok, false);
+  assert.equal(validateSaveFilename("..").ok, false);
+  assert.equal(validateSaveFilename(".bashrc").ok, false);
+  assert.equal(validateSaveFilename(".zshrc").ok, false);
+  assert.equal(validateSaveFilename("bad\0name.lgx").ok, false);
+  assert.equal(validateSaveFilename("bad\u0085name.lgx").ok, false);
+  assert.equal(validateSaveFilename("../escape.lgx").ok, false);
+  assert.equal(validateSaveFilename("sub/file.lgx").ok, false);
+  assert.equal(validateSaveFilename("lns-browser-0.2.8.lgx").ok, true);
+
+  // No /tmp fallback when downloadsDir is empty
+  assert.equal(buildSaveTargetPath("", "app.lgx").ok, false);
+  const target = buildSaveTargetPath("/Users/alice/Downloads/", "app.lgx");
+  assert.equal(target.ok, true);
+  assert.equal(target.path, "/Users/alice/Downloads/app.lgx");
+  assert.equal(buildSaveTargetPath("/Users/alice/Downloads", "..").ok, false);
+  assert.equal(buildSaveTargetPath("/Users/alice/Downloads", ".bashrc").ok, false);
+
+  // findPinnedSha256 resolves pinned sha256 from pageData.files or pageData.cid
+  const pinnedHash = "a".repeat(64);
+  const pageData = {
+    cid: "z4W2jPage0000000000000000000000000000000000000000",
+    sha256: "b".repeat(64),
+    files: [
+      { path: "/browser/files/app.lgx", cid: "z4W2jLgx0000000000000000000000000000000000000000", sha256: pinnedHash },
+    ],
+  };
+  assert.equal(findPinnedSha256("z4W2jLgx0000000000000000000000000000000000000000", "", pageData), pinnedHash);
+  assert.equal(findPinnedSha256("z4W2jPage0000000000000000000000000000000000000000", "", pageData), "b".repeat(64));
+  assert.equal(findPinnedSha256("z4W2jUnlisted00000000000000000000000000000000000", "", pageData), "");
+});
+
+test("Finding 7: CID caches verify expectedSha256, resist Object.prototype keys, and fold foldersVerified", () => {
+  const cidSub = "z4W2jSubDir00000000000000000000000000000000000000";
+  const cidPage = "z4W2jSubPage0000000000000000000000000000000000000";
+  const realSha = "1".repeat(64);
+  const wrongSha = "2".repeat(64);
+  const subList = parseLinksList(`# lns-links/1\nindex.html ${cidPage} ${realSha}\n`);
+
+  // Safe map ignores Object.prototype keys like "toString", "constructor", "hasOwnProperty"
+  const plainCache = {};
+  assert.equal(getCachedLinksEntry(plainCache, "toString", "").hit, false);
+  assert.equal(getCachedLinksEntry(plainCache, "constructor", "").hit, false);
+  assert.equal(getCachedImageEntry(plainCache, "hasOwnProperty", "").hit, false);
+
+  const safeCache = createSafeMap();
+  safeMapSet(safeCache, cidSub, { list: subList, sha256: realSha });
+  assert.equal(getCachedLinksEntry(safeCache, cidSub, realSha).hit, true);
+  const badHit = getCachedLinksEntry(safeCache, cidSub, wrongSha);
+  assert.equal(badHit.hit, false);
+  assert.equal(badHit.mismatch, true);
+
+  // Unhashed cache entry must miss (re-fetch) when a pinned sha256 is requested
+  const unhashedCache = createSafeMap();
+  safeMapSet(unhashedCache, cidSub, { list: subList, sha256: "" });
+  assert.equal(getCachedLinksEntry(unhashedCache, cidSub, realSha).hit, false);
+  assert.equal(getCachedLinksEntry(unhashedCache, cidSub, realSha).mismatch, false);
+
+  // resolveLinksSync verifies cached hashes and tracks foldersVerified
+  const rootUnpinned = parseLinksList(`# lns-links/1\nsub/ ${cidSub}\n`);
+  const rootPinnedWrong = parseLinksList(`# lns-links/1\nsub/ ${cidSub} ${wrongSha}\n`);
+  const rootPinnedRight = parseLinksList(`# lns-links/1\nsub/ ${cidSub} ${realSha}\n`);
+
+  const treeCache = createSafeMap();
+  const r1 = resolveLinksSync(rootUnpinned, "/sub/", () => ({ ok: true, list: subList, sha256: realSha }), treeCache);
+  assert.equal(r1.ok, true);
+  assert.equal(r1.foldersVerified, false);
+
+  const r2 = resolveLinksSync(rootPinnedRight, "/sub/", () => {
+    throw new Error("should hit verified cache");
+  }, treeCache);
+  assert.equal(r2.ok, true);
+  assert.equal(r2.foldersVerified, true);
+
+  const r3 = resolveLinksSync(rootPinnedWrong, "/sub/", () => {
+    throw new Error("should reject mismatched cached hash");
+  }, treeCache);
+  assert.equal(r3.ok, false);
+  assert.match(r3.error, /SHA-256 mismatch/i);
+});
+
+test("Finding 9, 12 & 15: list limits, base64DecodedLength, JS/Rust parity, strict UTF-8, and stale download guard", () => {
+  // Finding 9: base64DecodedLength + parseLinksList size & entry limits
+  assert.equal(base64DecodedLength(bytesToBase64(utf8ToBytes("hello"))), 5);
+  assert.equal(base64DecodedLength(bytesToBase64(utf8ToBytes("hi"))), 2);
+  assert.equal(parseLinksList("# lns-links/1\n" + " ".repeat(MAX_LINKS_LIST_BYTES + 1)).ok, false);
+  let many = "# lns-links/1\n";
+  for (let i = 0; i <= MAX_LINKS_ENTRIES; i++) {
+    many += "f" + i + ".txt z4W2jHomeHtml00000000000000000000000000000000000\n";
+  }
+  assert.equal(parseLinksList(many).ok, false);
+
+  // Finding 12: C1 control chars rejected
+  assert.equal(parseLinksList("# lns-links/1\nfoo\u0085bar z4W2jHomeHtml00000000000000000000000000000000000\n").ok, false);
+  assert.equal(isValidSegmentName("foo\u0085bar"), false);
+  assert.equal(normalizePath("/a\u009fb").ok, false);
+  assert.equal(parseUrl("nameswallet/bad\u0085path").ok, false);
+
+  // Finding 12: 255-byte UTF-8 cap (not UTF-16 code units)
+  assert.equal(isValidSegmentName("é".repeat(130)), false); // 260 UTF-8 bytes
+  assert.equal(isValidSegmentName("é".repeat(127)), true);  // 254 UTF-8 bytes
+
+  // Finding 12: canonical sort order matches Rust UTF-8 / Unicode scalar order
+  assert.ok(cmpCodePoint("\uFF01.png", "🚀.png") < 0);
+  const sortedList = parseLinksList(
+    "# lns-links/1\n🚀.png z4W2jHomeHtml00000000000000000000000000000000000\n\uFF01.png z4W2jShotPng000000000000000000000000000000000000\n",
+  );
+  assert.equal(sortedList.ok, true);
+  assert.deepEqual(sortedList.entries.map((e) => e.name), ["\uFF01.png", "🚀.png"]);
+
+  // Finding 12: `# title` with `\t` round-trips cleanly
+  const tabbed = parseLinksList("# lns-links/1\n# title A\tB\n");
+  assert.equal(tabbed.ok, true);
+  assert.equal(tabbed.title, "A B");
+  const formattedTab = formatLinksList(tabbed);
+  assert.equal(formattedTab.ok, true);
+  assert.match(formattedTab.text, /# title A B\n/);
+
+  // Finding 12: bytesToUtf8Strict rejects invalid UTF-8 sequences
+  assert.equal(bytesToUtf8Strict([0xff, 0xfe]).ok, false);
+  assert.equal(bytesToUtf8Strict([0xc0, 0xaf]).ok, false); // overlong
+  assert.equal(bytesToUtf8Strict([0xed, 0xa0, 0x80]).ok, false); // surrogate
+  assert.equal(bytesToUtf8Strict(utf8ToBytes("Hello 🚀")).text, "Hello 🚀");
+
+  // Finding 15: stale download guard
+  assert.equal(isStaleDownload({ navSeq: 1 }, 2), true);
+  assert.equal(isStaleDownload({ navSeq: 2 }, 2), false);
+  assert.equal(isStaleDownload(null, 2), true);
+});
+
+test("Finding 10: sanitizeHtmlFallback blocks slash-separated attributes and prototype-key colors/defs", () => {
+  const hostile =
+    '<html><head><style>body{background:toString;color:constructor} a{color:valueOf}</style></head>' +
+    '<body><table/background="https://evil.example/t.png"><a/href="http://evil.example">Go</a></table>' +
+    '<a/href="javascript:alert(1)">XSS</a>' +
+    '<svg viewBox="0 0 10 10"><use href="#constructor"/></svg></body></html>';
+  const clean = sanitizeHtmlFallback(hostile, "lns://demo", "/");
+  assert.equal(clean.bg_color, null);
+  assert.equal(clean.fg_color, null);
+  assert.equal(clean.link_color, null);
+  assert.doesNotMatch(clean.html, /evil\.example/i);
+  assert.doesNotMatch(clean.html, /<table/i);
+  assert.doesNotMatch(clean.html, /javascript:/i);
+  assert.doesNotMatch(clean.html, /<a\b/i);
+  assert.equal(extractSvgCanvasOps('<svg><use href="#constructor"/></svg>', "#000000", {}).length, 0);
+});
+
+test("Round 6: classifyWebViewUrl enforces loopback origin/token isolation and routes ext/lns/dl", () => {
+  const origin = "http://127.0.0.1:51234";
+  const token = "0123456789abcdef0123456789abcdef";
+  const siteBase = "lns://nameswallet";
+
+  assert.equal(classifyWebViewUrl("about:blank", origin, token, siteBase).action, "ignore");
+
+  // Same-site loopback path allowed and mapped back to canonical LNS URL
+  const okNav = classifyWebViewUrl(`${origin}/${token}/browser/index.html#dl`, origin, token, siteBase);
+  assert.equal(okNav.action, "allow");
+  assert.equal(okNav.sitePath, "/browser/index.html");
+  assert.equal(okNav.canonical, "lns://nameswallet/browser/index.html#dl");
+
+  // Rewritten /_ext, /_lns, /_dl endpoints
+  const ext = classifyWebViewUrl(`${origin}/${token}/_ext?u=https%3A%2F%2Fnameswallet.app%2Fbrowser`, origin, token, siteBase);
+  assert.deepEqual(ext, { action: "ext", url: "https://nameswallet.app/browser" });
+
+  const lns = classifyWebViewUrl(`${origin}/${token}/_lns?u=lns%3A%2F%2Fjef%2Fabout`, origin, token, siteBase);
+  assert.deepEqual(lns, { action: "lns", url: "lns://jef/about" });
+
+  const dl = classifyWebViewUrl(`${origin}/${token}/_dl?path=%2Fbrowser%2Ffiles%2Fapp.lgx&name=app.lgx`, origin, token, siteBase);
+  assert.deepEqual(dl, { action: "dl", cid: "", path: "/browser/files/app.lgx", filename: "app.lgx" });
+
+  // Direct https://, lns://, cid:// routed properly
+  assert.deepEqual(classifyWebViewUrl("https://nameswallet.app/docs", origin, token, siteBase), {
+    action: "ext",
+    url: "https://nameswallet.app/docs",
+  });
+  assert.deepEqual(classifyWebViewUrl("lns://helloworld/page", origin, token, siteBase), {
+    action: "lns",
+    url: "lns://helloworld/page",
+  });
+
+  // Wrong port, wrong token, traversal, and dangerous schemes blocked
+  assert.equal(classifyWebViewUrl(`http://127.0.0.1:59999/${token}/`, origin, token, siteBase).action, "block");
+  assert.equal(classifyWebViewUrl(`${origin}/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/`, origin, token, siteBase).action, "block");
+  assert.equal(classifyWebViewUrl(`${origin}/${token}/../etc/passwd`, origin, token, siteBase).action, "block");
+  assert.equal(classifyWebViewUrl(`${origin}/${token}/%2e%2e/secret`, origin, token, siteBase).action, "block");
+  assert.equal(classifyWebViewUrl("http://evil.example/leak", origin, token, siteBase).action, "block");
+  assert.equal(classifyWebViewUrl("file:///etc/passwd", origin, token, siteBase).action, "block");
+  assert.equal(classifyWebViewUrl("basecamp://intent/wallet.send", origin, token, siteBase).action, "block");
+  assert.equal(classifyWebViewUrl("javascript:alert(1)", origin, token, siteBase).action, "block");
+  assert.equal(classifyWebViewUrl("https://user:pass@evil.example/", origin, token, siteBase).action, "block");
+
+  // Helper round-trips
+  assert.equal(buildLoopbackEntryUrl(origin, token, "/browser/"), `${origin}/${token}/browser/`);
+  assert.equal(sitePathFromLoopbackUrl(`${origin}/${token}/browser/?x=1#top`, origin, token).path, "/browser/");
+  assert.equal(parseQueryString("a=1&b=hello+world")["b"], "hello world");
+});
+
+test("Round 6: tabs, window title/geometry, zoom, bookmarks, history, recent sites, and find", () => {
+  const t1 = createTab(1, { kind: "lns", host: "nameswallet", url: "lns://nameswallet", siteBase: "lns://nameswallet" });
+  const t2 = createTab(2, { kind: "cid", host: "z4W2jHomeHtml00000000000000000000000000000000000" });
+  const t3 = createTab(3, {});
+
+  assert.equal(formatWindowTitle(t1), "nameswallet — LNS Browser");
+  assert.equal(formatWindowTitle(t2), "z4W2jHomeH...000000 — LNS Browser");
+  assert.equal(formatWindowTitle(t3), "LNS Browser");
+  assert.equal(formatTabTitle(t1), "nameswallet");
+  assert.equal(formatTabTitle(t3), "New Tab");
+
+  // History per tab
+  const h1 = pushTabHistory(t1, "lns://nameswallet");
+  t1.history = h1.history; t1.historyIdx = h1.historyIdx;
+  const h2 = pushTabHistory(t1, "lns://nameswallet/browser/");
+  t1.history = h2.history; t1.historyIdx = h2.historyIdx;
+  assert.equal(canTabGoBack(t1), true);
+  assert.equal(canTabGoForward(t1), false);
+  t1.historyIdx -= 1;
+  assert.equal(canTabGoBack(t1), false);
+  assert.equal(canTabGoForward(t1), true);
+
+  // Closing tabs adjusts activeIndex and signals window close on last tab
+  const c1 = closeTabState([t1, t2, t3], 2, 1);
+  assert.equal(c1.tabs.length, 2);
+  assert.equal(c1.activeIndex, 1);
+  assert.equal(c1.shouldCloseWindow, false);
+  const cLast = closeTabState([t1], 0, 0);
+  assert.equal(cLast.tabs.length, 0);
+  assert.equal(cLast.shouldCloseWindow, true);
+
+  // Window geometry & zoom clamping
+  assert.deepEqual(clampWindowGeometry({ x: -5000, y: -50, width: 200, height: 100 }), {
+    x: -200,
+    y: 0,
+    width: 720,
+    height: 480,
+  });
+  assert.equal(clampZoomPercent(30), 50);
+  assert.equal(clampZoomPercent(112), 110);
+  assert.equal(clampZoomPercent(400), 200);
+
+  // Bookmarks toggle & lookup
+  let bms = [];
+  const addRes = toggleBookmark(bms, { url: "lns://nameswallet", title: "Names Wallet", name: "nameswallet", added_at: 10 });
+  bms = addRes.bookmarks;
+  assert.equal(addRes.bookmarked, true);
+  assert.equal(isBookmarked(bms, "lns://nameswallet"), true);
+  const rmRes = toggleBookmark(bms, { url: "lns://nameswallet" });
+  assert.equal(rmRes.bookmarked, false);
+  assert.equal(isBookmarked(rmRes.bookmarks, "lns://nameswallet"), false);
+
+  // History & recent sites extraction
+  let hist = [];
+  hist = recordHistoryEntry(hist, { url: "lns://nameswallet", title: "Names Wallet", name: "nameswallet", visited_at: 1 });
+  hist = recordHistoryEntry(hist, { url: "lns://nameswallet/browser/", title: "Browser", name: "nameswallet", visited_at: 2 });
+  hist = recordHistoryEntry(hist, { url: "lns://helloworld", title: "Hello", name: "helloworld", visited_at: 3 });
+  assert.equal(hist.length, 3);
+  const recent = extractRecentSites(hist, 8);
+  assert.deepEqual(recent.map((r) => r.siteBase), ["lns://helloworld", "lns://nameswallet"]);
+
+  // Reader Mode find count
+  assert.equal(countTextMatches("<h1>Logos Browser</h1><p>Welcome to logos LNS!</p>", "logos"), 2);
+  assert.equal(countTextMatches("<p>hello</p>", ""), 0);
 });

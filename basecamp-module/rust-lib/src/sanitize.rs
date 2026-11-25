@@ -52,10 +52,21 @@ pub struct SvgOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DownloadLink {
+    pub href: String,
+    pub cid: Option<String>,
+    pub path: Option<String>,
+    pub filename: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderBlock {
     pub kind: String, // "html" | "svg" | "image"
     pub html: Option<String>,
     pub data_uri: Option<String>,
+    pub src_cid: Option<String>,
+    pub src_path: Option<String>,
     pub alt: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -75,6 +86,7 @@ pub struct Sanitized {
     pub fg_color: Option<String>,
     pub link_color: Option<String>,
     pub blocks: Vec<RenderBlock>,
+    pub downloads: Vec<DownloadLink>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -100,6 +112,7 @@ pub fn sanitize_html(source: &str, site_base: &str, current_path: &str) -> Sanit
     let bytes = input.as_bytes();
     let mut out = String::new();
     let mut blocks: Vec<RenderBlock> = Vec::new();
+    let mut downloads: Vec<DownloadLink> = Vec::new();
     let mut open: Vec<&'static str> = Vec::new();
     let mut title: Option<String> = None;
     let mut truncated = cut < source.len();
@@ -233,10 +246,11 @@ pub fn sanitize_html(source: &str, site_base: &str, current_path: &str) -> Sanit
             continue;
         }
 
-        // Handle safe inline <img src="data:image/..."> (strictly blocks external URLs)
+        // Handle safe inline <img src="data:image/...">, <img src="cid://...">, and relative <img src="./...">
+        // (strictly blocks external http:// / https:// URLs)
         if !is_close && tag_name == "img" {
             if skip_hidden_depth == 0 {
-                if let Some(img_block) = sanitize_data_img(attrs) {
+                if let Some(img_block) = sanitize_img_block(attrs, site_base, current_path) {
                     flush_html_block(&mut out, &mut open, &mut blocks);
                     blocks.push(img_block);
                 }
@@ -290,6 +304,9 @@ pub fn sanitize_html(source: &str, site_base: &str, current_path: &str) -> Sanit
         if allowed == "a" {
             if let Some(raw_href) = extract_attr(attrs, "href") {
                 if let Some(safe_href) = resolve_safe_link(&raw_href, site_base, current_path) {
+                    if let Some(dl) = extract_download_link(&safe_href, attrs, site_base) {
+                        downloads.push(dl);
+                    }
                     out.push_str("<a href=\"");
                     push_escaped(&mut out, &safe_href);
                     out.push('"');
@@ -336,6 +353,8 @@ pub fn sanitize_html(source: &str, site_base: &str, current_path: &str) -> Sanit
             kind: "html".to_owned(),
             html: Some(out.clone()),
             data_uri: None,
+            src_cid: None,
+            src_path: None,
             alt: None,
             width: None,
             height: None,
@@ -362,6 +381,7 @@ pub fn sanitize_html(source: &str, site_base: &str, current_path: &str) -> Sanit
         fg_color: sheet.fg_color,
         link_color: sheet.link_color,
         blocks,
+        downloads,
     }
 }
 
@@ -469,6 +489,8 @@ pub fn markdown_to_safe_html(source: &str, site_base: &str, current_path: &str) 
             kind: "html".to_owned(),
             html: Some(out.clone()),
             data_uri: None,
+            src_cid: None,
+            src_path: None,
             alt: None,
             width: None,
             height: None,
@@ -487,6 +509,7 @@ pub fn markdown_to_safe_html(source: &str, site_base: &str, current_path: &str) 
         fg_color: None,
         link_color: None,
         blocks,
+        downloads: Vec::new(),
     }
 }
 
@@ -526,17 +549,29 @@ pub fn resolve_safe_link(raw: &str, site_base: &str, current_path: &str) -> Opti
     if base.is_empty() {
         return None;
     }
-    let path_only = trimmed.split(['?', '#']).next().unwrap_or("");
-    let joined = if path_only.starts_with('/') {
-        normalize_site_path(path_only)
+    let (without_frag, fragment) = match trimmed.find('#') {
+        Some(idx) => (&trimmed[..idx], &trimmed[idx..]),
+        None => (trimmed.as_str(), ""),
+    };
+    if fragment
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
+    {
+        return None;
+    }
+    let path_only = without_frag.split('?').next().unwrap_or("");
+    let raw_joined = if path_only.starts_with('/') {
+        path_only.to_owned()
     } else {
-        let dir = current_path
+        let clean_cur = current_path.split(['?', '#']).next().unwrap_or("/");
+        let dir = clean_cur
             .rsplit_once('/')
             .map(|(d, _)| d)
             .unwrap_or("");
-        normalize_site_path(&format!("{dir}/{path_only}"))
+        format!("{dir}/{path_only}")
     };
-    Some(format!("{base}{joined}"))
+    let norm = crate::links::normalize_links_path(&raw_joined).ok()?;
+    Some(format!("{base}{}{fragment}", norm.path))
 }
 
 pub fn normalize_site_path(raw: &str) -> String {
@@ -570,6 +605,8 @@ fn flush_html_block(out: &mut String, open: &mut Vec<&'static str>, blocks: &mut
         kind: "html".to_owned(),
         html: Some(std::mem::take(out)),
         data_uri: None,
+        src_cid: None,
+        src_path: None,
         alt: None,
         width: None,
         height: None,
@@ -1043,6 +1080,8 @@ fn sanitize_svg_block(raw_svg: &str, attrs: &str, sheet: &StyleSheet) -> Option<
                     kind: "html".to_owned(),
                     html: Some(h),
                     data_uri: None,
+                    src_cid: None,
+                    src_path: None,
                     alt,
                     width: None,
                     height: None,
@@ -1087,6 +1126,8 @@ fn sanitize_svg_block(raw_svg: &str, attrs: &str, sheet: &StyleSheet) -> Option<
         kind: "svg".to_owned(),
         html: None,
         data_uri: Some(format!("data:image/svg+xml;base64,{b64}")),
+        src_cid: None,
+        src_path: None,
         alt,
         width: Some(width),
         height: Some(height),
@@ -1371,6 +1412,169 @@ fn extract_svg_canvas_ops(raw_svg: &str, default_fill: &str, sheet: &StyleSheet)
     ops
 }
 
+fn sanitize_img_block(attrs: &str, site_base: &str, current_path: &str) -> Option<RenderBlock> {
+    if let Some(data_img) = sanitize_data_img(attrs) {
+        return Some(data_img);
+    }
+    let raw_src = extract_attr(attrs, "src")?;
+    let src = decode_entities(raw_src.trim());
+    if src.is_empty() || src.len() > MAX_HREF || src.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let alt = extract_attr(attrs, "alt").map(|a| decode_entities(&a));
+    let width = extract_attr(attrs, "width").and_then(|v| parse_px_u32(&v));
+    let height = extract_attr(attrs, "height").and_then(|v| parse_px_u32(&v));
+
+    if src.len() >= 6 && src[..6].eq_ignore_ascii_case("cid://") {
+        let cid = src[6..].split(['/', '?', '#']).next().unwrap_or("");
+        if !crate::storage::is_valid_cid(cid) {
+            return None;
+        }
+        return Some(RenderBlock {
+            kind: "image".to_owned(),
+            html: None,
+            data_uri: None,
+            src_cid: Some(cid.to_owned()),
+            src_path: None,
+            alt,
+            width,
+            height,
+            vb_x: None,
+            vb_y: None,
+            vb_w: None,
+            vb_h: None,
+            ops: Vec::new(),
+        });
+    }
+
+    if src.contains(':') || src.starts_with("//") || src.starts_with('#') || site_base.trim().is_empty() {
+        return None;
+    }
+    let path_only = src.split(['?', '#']).next().unwrap_or("");
+    if path_only.is_empty() {
+        return None;
+    }
+    let resolved = if path_only.starts_with('/') {
+        normalize_site_path(path_only)
+    } else {
+        let dir = current_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        normalize_site_path(&format!("{dir}/{path_only}"))
+    };
+    Some(RenderBlock {
+        kind: "image".to_owned(),
+        html: None,
+        data_uri: None,
+        src_cid: None,
+        src_path: Some(resolved),
+        alt,
+        width,
+        height,
+        vb_x: None,
+        vb_y: None,
+        vb_w: None,
+        vb_h: None,
+        ops: Vec::new(),
+    })
+}
+
+fn has_attr_flag(attrs: &str, target: &str) -> bool {
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let name_start = i;
+        while i < bytes.len()
+            && !bytes[i].is_ascii_whitespace()
+            && bytes[i] != b'='
+            && bytes[i] != b'/'
+        {
+            i += 1;
+        }
+        let name = &attrs[name_start..i];
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let matched = name.eq_ignore_ascii_case(target);
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_download_link(safe_href: &str, attrs: &str, site_base: &str) -> Option<DownloadLink> {
+    let explicit_dl = has_attr_flag(attrs, "download");
+    let dl_val = extract_attr(attrs, "download")
+        .map(|v| decode_entities(v.trim()))
+        .unwrap_or_default();
+
+    if safe_href.len() >= 6 && safe_href[..6].eq_ignore_ascii_case("cid://") {
+        let cid = safe_href[6..].split(['/', '?', '#']).next().unwrap_or("");
+        if !crate::storage::is_valid_cid(cid) || !explicit_dl {
+            return None;
+        }
+        let filename = if !dl_val.is_empty() {
+            dl_val
+        } else {
+            format!("{}.bin", &cid[..cid.len().min(12)])
+        };
+        return Some(DownloadLink {
+            href: format!("cid://{cid}"),
+            cid: Some(cid.to_owned()),
+            path: None,
+            label: filename.clone(),
+            filename,
+        });
+    }
+
+    let base = site_base.trim_end_matches('/');
+    if !base.is_empty() {
+        if let Some(rel) = safe_href.strip_prefix(base).filter(|r| r.starts_with('/')) {
+            let clean_rel = rel.split(['?', '#']).next().unwrap_or("");
+            if !explicit_dl && !crate::links::is_binary_download_path(clean_rel) {
+                return None;
+            }
+            let fallback_name = clean_rel.rsplit('/').next().unwrap_or("download.bin");
+            let filename = if !dl_val.is_empty() {
+                dl_val
+            } else {
+                fallback_name.to_owned()
+            };
+            return Some(DownloadLink {
+                href: safe_href.to_owned(),
+                cid: None,
+                path: Some(clean_rel.to_owned()),
+                label: filename.clone(),
+                filename,
+            });
+        }
+    }
+
+    None
+}
+
 fn sanitize_data_img(attrs: &str) -> Option<RenderBlock> {
     let src = extract_attr(attrs, "src")?.trim().to_owned();
     if src.len() > MAX_DATA_IMG_BYTES {
@@ -1400,6 +1604,8 @@ fn sanitize_data_img(attrs: &str) -> Option<RenderBlock> {
         kind: "image".to_owned(),
         html: None,
         data_uri: Some(src),
+        src_cid: None,
+        src_path: None,
         alt,
         width,
         height,
@@ -1455,7 +1661,7 @@ fn parse_px_u32(raw: &str) -> Option<u32> {
     }
 }
 
-fn base64_encode(input: &[u8]) -> String {
+pub fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
@@ -1765,5 +1971,52 @@ mod tests {
         assert!(s.html.contains(r#"<a href="https://nameswallet.app/browser">Browser</a>"#));
         assert!(!s.html.contains("evil.com"));
         assert!(!s.html.contains("javascript:"));
+    }
+
+    #[test]
+    fn extracts_cid_and_relative_images_and_download_links_while_blocking_external_images() {
+        let html = r#"
+            <html><body>
+              <img src="cid://z4W2jBrowserShot0000000000000000000000000000000000" alt="Shot">
+              <img src="./thumb.png" alt="Thumb">
+              <img src="https://evil.example/pixel.png" alt="Blocked">
+              <a href="cid://z4W2jBrowserUiLgx00000000000000000000000000000000" download="lns-browser-0.2.8.lgx">Download UI</a>
+              <a href="./files/core.lgx">Core</a>
+            </body></html>
+        "#;
+        let s = sanitize_html(html, "lns://nameswallet", "/browser/index.html");
+        let imgs: Vec<&RenderBlock> = s.blocks.iter().filter(|b| b.kind == "image").collect();
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(
+            imgs[0].src_cid.as_deref(),
+            Some("z4W2jBrowserShot0000000000000000000000000000000000")
+        );
+        assert_eq!(imgs[1].src_path.as_deref(), Some("/browser/thumb.png"));
+        assert_eq!(s.downloads.len(), 2);
+        assert_eq!(s.downloads[0].filename, "lns-browser-0.2.8.lgx");
+        assert_eq!(
+            s.downloads[0].cid.as_deref(),
+            Some("z4W2jBrowserUiLgx00000000000000000000000000000000")
+        );
+        assert_eq!(s.downloads[1].path.as_deref(), Some("/browser/files/core.lgx"));
+        assert_eq!(s.downloads[1].filename, "core.lgx");
+    }
+
+    #[test]
+    fn finding17_cross_site_prefix_not_matched_and_fragment_trailing_slash_preserved() {
+        // Cross-site link `lns://alice/app.lgx` on site `lns://a` must NOT match as local download
+        let html = r#"<html><body><a href="lns://alice/app.lgx">App</a><a href="./docs/#intro">Docs</a></body></html>"#;
+        let s = sanitize_html(html, "lns://a", "/index.html");
+        assert_eq!(s.downloads.len(), 0);
+        assert!(s.html.contains(r#"href="lns://a/docs/#intro""#));
+
+        assert_eq!(
+            resolve_safe_link("/browser/", "lns://nameswallet", "/index.html").as_deref(),
+            Some("lns://nameswallet/browser/")
+        );
+        assert_eq!(
+            resolve_safe_link("./guide.html#section-2", "lns://nameswallet", "/browser/index.html").as_deref(),
+            Some("lns://nameswallet/browser/guide.html#section-2")
+        );
     }
 }

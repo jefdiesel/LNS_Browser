@@ -4,31 +4,39 @@ import QtQuick.Layouts
 import Logos.Theme
 import "logic.mjs" as Logic
 
-// Native Basecamp LNS + Logos Storage CID Web Browser.
-// Security & Storage model:
-// - Resolves LNS names through Basecamp's built-in `names` core module (LEZ 0.4).
-// - Uses Basecamp's bundled P2P `storage_module` automatically when installed; NEVER defaults to
-//   http://127.0.0.1:8080 (which is the Logos Blockchain node's port). If `storage_module` is
-//   absent, the user explicitly picks a real Logos Storage node URL in Settings.
-// - Verifies SHA-256 commitments before rendering, renders with zero JS and zero external network
-//   subresources, and pauses on `https://` clicks with a confirmation strip (`Open` / `Copy`).
-// - On-chain site updates hand off via Basecamp's `names.publish_site` intent so Names verifies
-//   ownership and shows a single-click approval sheet before signing.
+// Basecamp LNS Browser Start Page & Core/Storage Host.
+// Architecture (Round 6):
+// - The Basecamp tab is the Start Page (address box, bookmarks, history, recently opened sites,
+//   "Open Browser Window" button, Publish panel, Settings panel).
+// - Pages open in `BrowserWindow.qml`: a normal titled macOS/desktop Window containing QtWebView
+//   backed by the per-site loopback HTTP/1.1 server in `lns_browser_core` (strict CSP, isolated
+//   ephemeral 127.0.0.1:<port>/<token>/ origin, verified SHA-256 bytes, sterilised JS ON by default,
+//   one-click Reader Mode fallback inside the same window).
+// - Unloading the app closes the browser window and shuts down all loopback servers.
 Item {
     id: root
     readonly property bool bridgeReady: typeof logos !== "undefined" && logos !== null
 
-    property string urlInput: ""
-    property var history: []
-    property int historyIdx: -1
+    property string startUrlInput: ""
     property bool loading: false
     property string problem: ""
     property string notice: ""
-    property string pendingExternalUrl: ""
 
-    property var parsedUrl: null
-    property var siteInfo: null
-    property var pageData: null
+    // Persisted browser data (stored via lns_browser_core in ~/.config/lns-browser/)
+    property var bookmarks: []
+    property var browsingHistory: []
+    property var recentSites: []
+    property bool defaultReaderMode: false
+
+    // Reader Mode caches & state (per-folder `lns-links/1` + raster image cache)
+    property var linksCache: ({})
+    property var imageCache: ({})
+    property var activeRootList: null
+    property var activeWalk: null
+    property var pendingImages: []
+    property var activeImageTask: null
+    property var activeSave: null
+    property string downloadsDir: ""
 
     // Storage backend state: "checking" | "basecamp" | "http" | "none"
     property string storageBackend: "checking"
@@ -40,24 +48,28 @@ Item {
     property string basecampNetwork: ""
     property var storageInfo: null
     property string storageApiInput: ""   // NEVER defaults to 127.0.0.1:8080 (Logos Blockchain port)
-    property string storagePeersInput: "" // One per line: "peerId /ip4/…/tcp/…" (stored locally in ~/.config/lns-browser/config.json)
+    property string storagePeersInput: "" // One per line: "peerId /ip4/…/tcp/…"
     property string peerConnectStatus: ""
-    property var peerConnectQueue: null   // { peers, idx, errors, connected, onDone }
+    property var peerConnectQueue: null
 
     // Active storage_module async download / upload state
-    property var activeDownload: null  // { cid, expectedSha256, siteBase, path, chunks, manifestRoot }
-    property var activeUpload: null    // { sessionId, name, sha256, mode, sentChunk }
-    property var pendingResolve: null  // { seq, method, name, attempt, onResult, onError }
+    property var activeDownload: null
+    property var activeUpload: null
+    property var pendingResolve: null
     property int resolveSeq: 0
+    property int readerTabId: -1
+    property int readerNavSeq: 0
+    property var readerPageData: null
+    property var readerSiteInfo: null
+    property string readerSiteBase: ""
 
     property bool settingsOpen: false
     property bool publishOpen: false
-    property bool filesOpen: false
 
     property string pubName: ""
     property string pubTitle: ""
     property string pubLocalPath: ""
-    property string pubMode: "page" // defaults to On-Chain HTML (<= 78 KB); switches to "cid" if storage is ready
+    property string pubMode: "page"
     property string pubHtml: "<!doctype html>\n<html>\n<head>\n  <meta charset=\"utf-8\">\n  <title>Hello Logos</title>\n  <style>body{background:#ffffff;color:#18202c} a{color:#0055ff}</style>\n</head>\n<body>\n  <h1 style=\"color:#0055ff\">Hello from LNS + Logos Storage</h1>\n  <p>Resolved on LEZ 0.4 and verified by SHA-256.</p>\n  <p><a href=\"lns://jef\">Visit lns://jef</a> &middot; <a href=\"https://nameswallet.app/browser\">nameswallet.app/browser &rarr;</a></p>\n</body>\n</html>"
     property var lastPublished: null
     property string lastDeepLink: ""
@@ -75,14 +87,39 @@ Item {
     readonly property string sans: "Avenir Next"
     readonly property string mono: "Menlo"
 
-    readonly property color pageBg: (pageData && pageData.bg_color) ? pageData.bg_color : root.card
-    readonly property color pageFg: (pageData && pageData.fg_color) ? pageData.fg_color : root.ink
-    readonly property color pageLink: (pageData && pageData.link_color) ? pageData.link_color : root.brass
-    readonly property bool pageIsLight: pageData && pageData.bg_color ? (pageBg.r * 0.299 + pageBg.g * 0.587 + pageBg.b * 0.114) > 0.55 : !Theme.isDark
-    readonly property color pageDim: pageData && pageData.bg_color ? (pageIsLight ? "#526075" : "#9aa7b8") : root.dim
+    BrowserWindow {
+        id: browserWindow
+        host: root
+    }
 
     Component.onCompleted: {
+        linksCache = Logic.createSafeMap()
+        imageCache = Logic.createSafeMap()
         initStorage()
+        loadPersistedBrowserData()
+    }
+
+    Component.onDestruction: {
+        browserWindow.shutdownOnAppUnload()
+        if (bridgeReady) {
+            callCore("lns_browser_core", "site_close_all", [], function() {}, function() {}, 2000)
+        }
+    }
+
+    Timer {
+        id: saveTimeoutTimer
+        interval: 30000
+        repeat: false
+        onTriggered: {
+            if (root.activeSave !== null) {
+                var sv = root.activeSave
+                root.activeSave = null
+                root.loading = false
+                var svMsg = Logic.formatStorageFetchError(sv.cid, sv.path || sv.filename, "timed out saving file from Logos Storage")
+                root.problem = svMsg
+                browserWindow.onCoreDownloadFinished(false, sv.filename, sv.savePath, false, svMsg)
+            }
+        }
     }
 
     Timer {
@@ -91,11 +128,17 @@ Item {
         repeat: false
         onTriggered: {
             if (root.activeDownload !== null) {
-                var cid = root.activeDownload.cid
+                var dl = root.activeDownload
                 root.activeDownload = null
-                root.loading = false
-                root.pageData = null
-                root.problem = Logic.formatUnreachableCidError(cid, "timed out waiting for Logos Storage peers")
+                if (dl.navSeq !== root.readerNavSeq || dl.tabId !== root.readerTabId) return
+                if (dl.purpose === "image" || dl.purpose === "image_dir") {
+                    root.activeImageTask = null
+                    root.fetchNextQueuedImage()
+                    return
+                }
+                root.activeWalk = null
+                var errMsg = Logic.formatStorageFetchError(dl.cid, dl.requestedPath || dl.path || "/", "timed out waiting for Logos Storage peers")
+                browserWindow.attachTabStorageError(dl.tabId, dl.navSeq, dl.cid, dl.requestedPath || dl.path || "/", errMsg)
             }
         }
     }
@@ -122,7 +165,7 @@ Item {
         onTriggered: root.runPendingResolve()
     }
 
-    // Handle incoming `lns.browse` intents and `storage_module` streaming events
+    // Handle incoming `lns.browse` intents and `storage_module` events
     Connections {
         target: root.bridgeReady ? logos : null
         ignoreUnknownSignals: true
@@ -131,7 +174,8 @@ Item {
             if (intent !== "lns.browse")
                 return
             var wanted = String(params && params.url ? params.url : "")
-            if (wanted !== "") root.navigate(wanted)
+            if (wanted !== "") root.openInBrowserWindow(wanted)
+            else browserWindow.openAndRaise()
             if (logos.respond) logos.respond(requestId, true, { url: wanted }, "")
         }
 
@@ -162,11 +206,9 @@ Item {
                 var q = root.peerConnectQueue
                 var peer = q.peers[q.idx]
                 if (payload.success === true) {
-                    console.log("lns_browser: storageConnect ok for", peer.peerId, JSON.stringify(payload))
                     q.connected += 1
                 } else {
                     var detail = String(payload.message || payload.error || JSON.stringify(payload))
-                    console.log("lns_browser: storageConnect failed for", peer.peerId, detail)
                     q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + detail)
                 }
                 q.idx += 1
@@ -175,25 +217,107 @@ Item {
             }
 
             if (eventName === "storageDownloadProgress" && root.activeDownload !== null) {
+                if (root.activeDownload.navSeq !== root.readerNavSeq || root.activeDownload.tabId !== root.readerTabId) {
+                    root.activeDownload = null
+                    downloadTimeoutTimer.stop()
+                    return
+                }
                 if (String(payload.sessionId || "") === root.activeDownload.cid && payload.chunk) {
-                    root.activeDownload.chunks.push(String(payload.chunk))
+                    var chunkStr = String(payload.chunk)
+                    var chunkBytes = Logic.base64DecodedLength(chunkStr)
+                    root.activeDownload.receivedBytes += chunkBytes
+                    if (root.activeDownload.receivedBytes > root.activeDownload.maxBytes) {
+                        downloadTimeoutTimer.stop()
+                        var overDl = root.activeDownload
+                        root.activeDownload = null
+                        if (overDl.purpose === "image" || overDl.purpose === "image_dir") {
+                            root.activeImageTask = null
+                            root.fetchNextQueuedImage()
+                            return
+                        }
+                        root.activeWalk = null
+                        browserWindow.attachTabStorageError(
+                            overDl.tabId,
+                            overDl.navSeq,
+                            overDl.cid,
+                            overDl.requestedPath || overDl.path || "/",
+                            "Download exceeds limit of " + overDl.maxBytes + " bytes"
+                        )
+                        return
+                    }
+                    root.activeDownload.chunks.push(chunkStr)
                 }
                 return
             }
 
-            if (eventName === "storageDownloadDone" && root.activeDownload !== null) {
-                if (String(payload.sessionId || "") !== root.activeDownload.cid)
-                    return
-                downloadTimeoutTimer.stop()
-                var dl = root.activeDownload
-                root.activeDownload = null
-                if (!payload.success) {
-                    root.loading = false
-                    root.pageData = null
-                    root.problem = Logic.formatUnreachableCidError(dl.cid, payload.error || "not found on network")
+            if (eventName === "storageDownloadDone") {
+                var sid = String(payload.sessionId || "")
+
+                // 1. User binary download save (through core -> ~/Downloads)
+                if (root.activeSave !== null && sid === root.activeSave.cid) {
+                    saveTimeoutTimer.stop()
+                    var sv = root.activeSave
+                    root.activeSave = null
+                    if (payload.success) {
+                        if (sv.sha256 && sv.sha256.length === 64) {
+                            root.callCore("lns_browser_core", "verify_saved_file", [sv.savePath, sv.sha256], function() {
+                                root.loading = false
+                                var okMsg = "Saved and verified " + sv.filename + " to " + sv.savePath
+                                root.notice = okMsg
+                                browserWindow.onCoreDownloadFinished(true, sv.filename, sv.savePath, true, okMsg)
+                            }, function(verErr) {
+                                root.loading = false
+                                root.problem = verErr
+                                browserWindow.onCoreDownloadFinished(false, sv.filename, sv.savePath, false, verErr)
+                            }, 30000)
+                        } else {
+                            root.loading = false
+                            var unpinnedMsg = "Saved " + sv.filename + " to " + sv.savePath + " (unpinned CID — no SHA-256 in list)"
+                            root.notice = unpinnedMsg
+                            browserWindow.onCoreDownloadFinished(true, sv.filename, sv.savePath, false, unpinnedMsg)
+                        }
+                    } else {
+                        root.loading = false
+                        var svErr = Logic.formatStorageFetchError(sv.cid, sv.path || sv.filename, payload.error || "download failed")
+                        root.problem = svErr
+                        browserWindow.onCoreDownloadFinished(false, sv.filename, sv.savePath, false, svErr)
+                    }
                     return
                 }
-                root.finishBasecampDownload(dl)
+
+                // 2. Reader Mode chunked download
+                if (root.activeDownload !== null && sid === root.activeDownload.cid) {
+                    downloadTimeoutTimer.stop()
+                    var dl = root.activeDownload
+                    root.activeDownload = null
+                    if (dl.navSeq !== root.readerNavSeq || dl.tabId !== root.readerTabId)
+                        return
+                    if (!payload.success) {
+                        if (dl.purpose === "image" || dl.purpose === "image_dir") {
+                            root.activeImageTask = null
+                            root.fetchNextQueuedImage()
+                            return
+                        }
+                        root.activeWalk = null
+                        var failMsg = Logic.formatStorageFetchError(dl.cid, dl.requestedPath || dl.path || "/", payload.error || "not found on network")
+                        browserWindow.attachTabStorageError(dl.tabId, dl.navSeq, dl.cid, dl.requestedPath || dl.path || "/", failMsg)
+                        return
+                    }
+                    root.finishBasecampDownload(dl)
+                    return
+                }
+
+                // 3. Loopback HTTP server `downloadToUrl` completion -> wake Rust core directly (zero bytes through QML!)
+                if (sid !== "" && browserWindow.hasAnyLoopbackSite()) {
+                    root.callCore(
+                        "lns_browser_core",
+                        "site_blob_ready",
+                        [sid, "", payload.success ? "true" : "false", String(payload.error || "")],
+                        function() {},
+                        function() {},
+                        5000
+                    )
+                }
                 return
             }
 
@@ -207,7 +331,6 @@ Item {
                     return
                 }
                 if (up.mode === "chunks" && up.sentChunk) {
-                    // Chunk stored — finalize to get real P2P CID
                     up.mode = "finalizing"
                     root.callCore("storage_module", "uploadFinalize", [up.sessionId], function(cid) {
                         var doneUp = root.activeUpload
@@ -258,23 +381,118 @@ Item {
         notice = "Copied to clipboard."
     }
 
+    function openInBrowserWindow(rawUrl) {
+        var clean = String(rawUrl || "").trim()
+        if (!clean) {
+            browserWindow.openAndRaise()
+            return
+        }
+        var parsed = Logic.parseUrl(clean)
+        if (!parsed.ok) {
+            problem = parsed.error
+            return
+        }
+        problem = ""
+        startUrlInput = parsed.canonical
+        browserWindow.openUrlFromExternal(parsed.canonical)
+    }
+
+    // ── Core Persistence (Bookmarks, History, Window Geometry) ───────────
+    function loadPersistedBrowserData() {
+        callCore("lns_browser_core", "bookmarks_get", [], function(list) {
+            bookmarks = Logic.toArray(list)
+        }, function() {}, 5000)
+        callCore("lns_browser_core", "history_get", [], function(list) {
+            var arr = Logic.toArray(list)
+            browsingHistory = arr
+            recentSites = Logic.extractRecentSites(arr, 8)
+        }, function() {}, 5000)
+        callCore("lns_browser_core", "browser_state_get", [], function(st) {
+            if (st && typeof st.reader_mode === "boolean") {
+                defaultReaderMode = st.reader_mode
+            }
+            browserWindow.applySavedGeometry(st && st.window ? st.window : null)
+        }, function() {
+            browserWindow.applySavedGeometry(null)
+        }, 5000)
+    }
+
+    function saveBrowserState(patch) {
+        callCore("lns_browser_core", "browser_state_set", [JSON.stringify(patch || {})], function() {}, function() {}, 5000)
+    }
+
+    function toggleBookmarkEntry(entry) {
+        var res = Logic.toggleBookmark(bookmarks, entry)
+        bookmarks = res.bookmarks
+        callCore("lns_browser_core", "bookmarks_set", [JSON.stringify(bookmarks)], function(saved) {
+            if (saved) bookmarks = Logic.toArray(saved)
+        }, function() {}, 5000)
+    }
+
+    function removeBookmarkUrl(url) {
+        toggleBookmarkEntry({ url: url })
+    }
+
+    function recordVisitedPage(entry) {
+        browsingHistory = Logic.recordHistoryEntry(browsingHistory, entry, 200)
+        recentSites = Logic.extractRecentSites(browsingHistory, 8)
+        callCore("lns_browser_core", "history_add", [JSON.stringify(entry)], function(saved) {
+            if (saved) {
+                var arr = Logic.toArray(saved)
+                browsingHistory = arr
+                recentSites = Logic.extractRecentSites(arr, 8)
+            }
+        }, function() {}, 5000)
+    }
+
+    function clearBrowsingHistory() {
+        browsingHistory = []
+        recentSites = []
+        callCore("lns_browser_core", "history_clear", [], function() {}, function() {}, 5000)
+    }
+
+    function closeLoopbackSite(token) {
+        if (!token) return
+        callCore("lns_browser_core", "site_close", [String(token)], function() {}, function() {}, 4000)
+    }
+
+    function startCoreDownload(token, cid, relPath, filename, pinnedSha256, onStarted, onError) {
+        callCore("lns_browser_core", "site_download_file", [String(token || ""), String(cid || ""), String(relPath || ""), String(filename || "")], function(info) {
+            if (info && info.done) {
+                if (onStarted) onStarted(info)
+                return
+            }
+            if (info && info.cid) {
+                activeSave = {
+                    cid: info.cid,
+                    sha256: info.sha256 || pinnedSha256 || "",
+                    filename: info.filename || filename || "download",
+                    savePath: info.path || "",
+                    path: relPath || info.filename || filename || ""
+                }
+                saveTimeoutTimer.restart()
+                if (onStarted) onStarted(info)
+            } else if (onError) {
+                onError("Unexpected download reply from core")
+            }
+        }, function(errMsg) {
+            if (onError) onError(errMsg)
+        }, 60000)
+    }
+
     function openExternalUrl(rawUrl) {
         var target = String(rawUrl || "").trim()
         if (!Logic.isExternalHttpsUrl(target)) {
             problem = "Only https:// external links can be opened."
             return
         }
-        // Launch via lns_browser_core (Basecamp's QML sandbox blocks https:// in Qt.openUrlExternally)
         callCore("lns_browser_core", "open_external_url", [target], function() {
-            pendingExternalUrl = ""
             problem = ""
             notice = "Opened " + target + " in your browser."
         }, function(err) {
-            // Fallback: try Qt.openUrlExternally, otherwise copy cleanly to clipboard
             var opened = false
             try { opened = Qt.openUrlExternally(target) } catch (e) { opened = false }
             if (opened) {
-                pendingExternalUrl = ""
                 notice = "Opened " + target + " in your browser."
             } else {
                 copyText(target)
@@ -338,7 +556,6 @@ Item {
             if (Logic.isBusyReply(reply, res.ok ? "" : res.error)) {
                 if (req.attempt < 20) {
                     req.attempt += 1
-                    console.log("lns_browser: names." + req.method + " busy for", req.name, "retrying", req.attempt, "/ 20")
                     notice = "Names is busy — retrying (" + req.attempt + "/20)..."
                     resolveRetryTimer.restart()
                     return
@@ -352,14 +569,12 @@ Item {
                 req.onResult(res.value)
                 return
             }
-            var rawStr = ""
-            try { rawStr = typeof reply === "string" ? reply : JSON.stringify(reply) } catch (e) { rawStr = String(reply) }
-            console.log("lns_browser: names." + req.method + " failed:", res.error, "(raw=" + rawStr + ")")
             pendingResolve = null
             req.onError(res.error)
         }, 30000)
     }
 
+    // ── Storage Lifecycle ────────────────────────────────────────────────
     function initStorage() {
         storageBackend = "checking"
         if (bridgeReady && logos.onModuleEvent) {
@@ -370,11 +585,9 @@ Item {
             logos.onModuleEvent("storage_module", "storageUploadProgress")
             logos.onModuleEvent("storage_module", "storageUploadDone")
         }
-        // Load persisted local config (storage_peers + optional external storage_api) first
         callCore("lns_browser_core", "config_get", [], function(cfg) {
-            if (cfg && typeof cfg.storage_peers_text === "string") {
-                storagePeersInput = cfg.storage_peers_text
-            }
+            if (cfg && typeof cfg.storage_peers_text === "string") storagePeersInput = cfg.storage_peers_text
+            if (cfg && typeof cfg.downloads_dir === "string") downloadsDir = cfg.downloads_dir
             probeStorageBackends()
         }, function() {
             probeStorageBackends()
@@ -382,20 +595,17 @@ Item {
     }
 
     function probeStorageBackends() {
-        // 1. Prefer Basecamp's bundled P2P storage_module when installed
         callCore("storage_module", "isRunning", [], function(running) {
             basecampStorageInstalled = true
             basecampStorageRunning = (running === true)
             storageBackend = "basecamp"
             if (basecampStorageRunning) {
-                // Verify the node is actually ready (non-empty peerId) before initial peer connect
                 verifyBasecampStorageReadyAndConnect()
             } else {
                 basecampStorageReady = false
                 startBasecampStorage()
             }
         }, function() {
-            // 2. storage_module not installed: check if the user explicitly configured an HTTP node
             basecampStorageInstalled = false
             basecampStorageRunning = false
             basecampStorageReady = false
@@ -417,8 +627,7 @@ Item {
             } else {
                 basecampStorageReady = false
             }
-        }, function(err) {
-            console.log("lns_browser: storage_module peerId ready-check not ready yet:", err)
+        }, function() {
             basecampStorageReady = false
         }, 5000)
     }
@@ -437,17 +646,11 @@ Item {
             return
         }
         if (!basecampStorageReady) {
-            peerConnectStatus = "Waiting for Basecamp Storage node to finish starting before connecting peers..."
+            peerConnectStatus = "Waiting for Basecamp Storage node to finish starting..."
             if (onDone) onDone(false, peerConnectStatus)
             return
         }
-        peerConnectQueue = {
-            peers: parsed.peers,
-            idx: 0,
-            errors: [],
-            connected: 0,
-            onDone: onDone
-        }
+        peerConnectQueue = { peers: parsed.peers, idx: 0, errors: [], connected: 0, onDone: onDone }
         stepPeerConnectQueue()
     }
 
@@ -460,30 +663,19 @@ Item {
             var errMsg = q.errors.join(" · ")
             if (q.errors.length > 0 && q.connected === 0) {
                 peerConnectStatus = errMsg
-                problem = errMsg
             } else if (q.errors.length > 0) {
                 peerConnectStatus = "Connected to " + q.connected + "/" + q.peers.length + " peers (" + errMsg + ")"
-                problem = errMsg
             } else {
                 peerConnectStatus = "Connected to " + q.connected + " storage peer" + (q.connected === 1 ? "" : "s")
-                problem = ""
             }
             if (q.onDone) q.onDone(q.errors.length === 0 || q.connected > 0, errMsg)
             return
         }
         var peer = q.peers[q.idx]
         peerConnectTimeoutTimer.restart()
-        // Route through Rust core (`lns_browser_core.storage_connect_peer`) so `peerAddresses: [tstr]`
-        // is passed as a real `Vec<String>` over `logos-rust-sdk` instead of a QML JS array.
-        console.log("lns_browser: connecting storage peer via core:", peer.peerId, JSON.stringify(peer.addrs))
-        callCore("lns_browser_core", "storage_connect_peer", [peer.peerId, JSON.stringify(peer.addrs)], function(res) {
-            console.log("lns_browser: storage_connect_peer command sent:", JSON.stringify(res))
-            // Wait for asynchronous `storageConnect` event (or 6s timeout)
-        }, function(err) {
+        callCore("lns_browser_core", "storage_connect_peer", [peer.peerId, JSON.stringify(peer.addrs)], function() {}, function(err) {
             peerConnectTimeoutTimer.stop()
-            var exactErr = String(err || "empty error from lns_browser_core.storage_connect_peer")
-            console.log("lns_browser: storage_connect_peer failed for", peer.peerId, exactErr)
-            q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + exactErr)
+            q.errors.push("Could not connect to storage peer " + Logic.shortHash(peer.peerId, 10, 6) + ": " + String(err || "error"))
             q.idx += 1
             stepPeerConnectQueue()
         }, 12000)
@@ -496,50 +688,31 @@ Item {
         callCore("storage_module", "loadConfigOrDefault", [], function(cfg) {
             var cfgStr = typeof cfg === "string" ? cfg : JSON.stringify(cfg || {})
             callCore("storage_module", "init", [cfgStr], function() {
-                callCore("storage_module", "start", [], function() {
-                    // Completion arrives asynchronously via `storageStart` event
-                }, function(err) {
+                callCore("storage_module", "start", [], function() {}, function(err) {
                     basecampStorageStarting = false
-                    console.log("lns_browser: storage_module.start reply:", err)
                     if (String(err).toLowerCase().indexOf("already") !== -1) {
                         basecampStorageRunning = true
                         verifyBasecampStorageReadyAndConnect()
                     }
                 }, 15000)
-            }, function(initErr) {
-                console.log("lns_browser: storage_module.init reply:", initErr)
-                // "already initialized" is expected when Basecamp shares one node across apps
-                callCore("storage_module", "start", [], function() {
-                    // Completion arrives asynchronously via `storageStart` event
-                }, function(err) {
+            }, function() {
+                callCore("storage_module", "start", [], function() {}, function(err) {
                     basecampStorageStarting = false
-                    console.log("lns_browser: storage_module.start reply:", err)
                     if (String(err).toLowerCase().indexOf("already") !== -1) {
                         basecampStorageRunning = true
                         verifyBasecampStorageReadyAndConnect()
                     }
                 }, 15000)
             }, 15000)
-        }, function(cfgErr) {
-            console.log("lns_browser: storage_module.loadConfigOrDefault failed:", cfgErr)
+        }, function() {
             basecampStorageStarting = false
         }, 10000)
-    }
-
-    function readBasecampStorageIdentity() {
-        callCore("storage_module", "peerId", [], function(pid) {
-            basecampPeerId = String(pid || "")
-        }, function() {}, 5000)
-        callCore("storage_module", "network", [], function(net) {
-            basecampNetwork = String(net || "")
-        }, function() {}, 5000)
     }
 
     function refreshHttpStorageStatus() {
         callCore("lns_browser_core", "storage_status", [], function(v) {
             storageInfo = v
             var api = v && v.storage_api ? String(v.storage_api).trim() : ""
-            // Never auto-adopt port 8080 from an older core build (8080 is Logos Blockchain)
             if (api !== "" && !Logic.isPort8080Url(api)) {
                 storageApiInput = api
                 if (!basecampStorageInstalled) storageBackend = "http"
@@ -558,56 +731,289 @@ Item {
         }, 5000)
     }
 
-    function pushHistory(canonical) {
-        var next = history.slice(0, historyIdx + 1)
-        next.push(canonical)
-        history = next
-        historyIdx = next.length - 1
+    // ── Tab Navigation (WebKit Loopback Mode + Reader Mode Fallback) ─────
+    function openLoopbackForTab(tabId, navSeq, spec, siteInfoObj) {
+        callCore("lns_browser_core", "site_open", [JSON.stringify(spec)], function(openInfo) {
+            browserWindow.attachLoopbackSite(tabId, navSeq, openInfo, siteInfoObj)
+        }, function(errMsg) {
+            browserWindow.attachTabStorageError(tabId, navSeq, spec.root_cid || "", spec.path || "/", "Could not start local site server: " + errMsg)
+        }, 15000)
     }
 
-    function goBack() {
-        if (historyIdx > 0) {
-            historyIdx -= 1
-            navigate(history[historyIdx], false)
+    function loadTabNavigation(tabId, navSeq, parsed, useReaderMode) {
+        resolveRetryTimer.stop()
+        pendingResolve = null
+
+        if (useReaderMode) {
+            downloadTimeoutTimer.stop()
+            activeDownload = null
+            activeWalk = null
+            activeRootList = null
+            pendingImages = []
+            activeImageTask = null
+            readerTabId = tabId
+            readerNavSeq = navSeq
+            readerPageData = null
+            readerSiteBase = parsed.siteBase
         }
-    }
 
-    function goForward() {
-        if (historyIdx >= 0 && historyIdx < history.length - 1) {
-            historyIdx += 1
-            navigate(history[historyIdx], false)
-        }
-    }
-
-    function activateLink(link) {
-        var s = String(link || "").trim()
-        if (!s) return
-        if (Logic.isExternalHttpsUrl(s)) {
-            pendingExternalUrl = s
+        if (parsed.kind === "cid") {
+            var cidInfo = { name: "", display: "Direct CID", bio: "", cid: parsed.cid, sha256: "", siteType: "", hasSite: true, texts: {} }
+            if (useReaderMode) {
+                readerSiteInfo = cidInfo
+                fetchCidPageReader(tabId, navSeq, parsed.cid, "", parsed.siteBase, parsed.path, "", cidInfo)
+                return
+            }
+            openCidInLoopback(tabId, navSeq, parsed, parsed.cid, "", "", cidInfo)
             return
         }
-        pendingExternalUrl = ""
-        navigate(s)
+
+        resolveNameWithRetry(parsed.name, function(record) {
+            if (!record) {
+                browserWindow.attachTabStorageError(tabId, navSeq, "", parsed.path, "LNS name not registered on LEZ: " + parsed.name)
+                return
+            }
+            var info = Logic.extractSiteInfo(record)
+            pubName = parsed.name
+            if (info.hasSite) {
+                if (useReaderMode) {
+                    readerSiteInfo = info
+                    fetchCidPageReader(tabId, navSeq, info.cid, info.sha256, parsed.siteBase, parsed.path, info.siteType, info)
+                    return
+                }
+                openCidInLoopback(tabId, navSeq, parsed, info.cid, info.sha256, info.siteType, info)
+                return
+            }
+
+            // Fallback: on-chain SetPage (HTML or < 10 KB lns-links/1)
+            pageNameWithRetry(parsed.name, function(pg) {
+                if (pg && pg.text && pg.text.length > 0) {
+                    var pgCt = pg.content_type || pg.contentType || ""
+                    if (Logic.isLinksContentType(pgCt) || Logic.isLinksListText(pg.text)) {
+                        var byteLen = Logic.utf8ToBytes(pg.text).length
+                        if (byteLen >= Logic.MAX_ONCHAIN_LINKS_BYTES) {
+                            browserWindow.attachTabStorageError(tabId, navSeq, "", parsed.path, "On-chain lns-links/1 list exceeds the 10 KB limit (" + byteLen + " bytes).")
+                            return
+                        }
+                        var parsedRoot = Logic.parseLinksList(pg.text)
+                        if (!parsedRoot.ok) {
+                            browserWindow.attachTabStorageError(tabId, navSeq, "", parsed.path, "Invalid on-chain lns-links/1 list: " + parsedRoot.error)
+                            return
+                        }
+                        if (storageBackend === "basecamp" && !basecampStorageReady) {
+                            browserWindow.attachTabStorageError(tabId, navSeq, "", parsed.path, "Basecamp's Storage node is still starting. Start it in Settings or click Retry.")
+                            if (!basecampStorageStarting) startBasecampStorage()
+                            return
+                        }
+                        if (storageBackend === "none") {
+                            browserWindow.attachTabStorageError(tabId, navSeq, "", parsed.path, "On-chain links list requires Basecamp's Storage module or an external Storage node.")
+                            return
+                        }
+                        if (useReaderMode) {
+                            readerSiteInfo = info
+                            if (storageBackend === "basecamp") {
+                                connectStoragePeers(function() {
+                                    startLinksWalkReader(tabId, navSeq, parsedRoot, parsed.siteBase, parsed.path, "", Logic.sha256HexUtf8(pg.text), true, info)
+                                })
+                                return
+                            }
+                            browserWindow.attachTabStorageError(tabId, navSeq, "", parsed.path, "Reader Mode on-chain links list requires Basecamp's Storage module (switch off Reader Mode to use HTTP Storage).")
+                            return
+                        }
+                        var launchOnchainLinks = function() {
+                            openLoopbackForTab(tabId, navSeq, {
+                                kind: "lns",
+                                host: parsed.name,
+                                site_base: parsed.siteBase,
+                                mode: "onchain-links",
+                                links_text: pg.text,
+                                path: parsed.path,
+                                backend: storageBackend,
+                                storage_api: storageApiInput.trim(),
+                                title: info.display || parsed.name
+                            }, info)
+                        }
+                        if (storageBackend === "basecamp") {
+                            connectStoragePeers(function() { launchOnchainLinks() })
+                        } else {
+                            launchOnchainLinks()
+                        }
+                        return
+                    }
+
+                    // Single-page on-chain HTML
+                    if (parsed.path !== "/" && parsed.path !== "/index.html") {
+                        browserWindow.attachTabNotFound(tabId, navSeq, parsed.path, parsed.siteBase, true)
+                        return
+                    }
+                    if (useReaderMode) {
+                        readerSiteInfo = info
+                        renderHtmlSafelyReader(tabId, navSeq, pg.text, {
+                            mode: "onchain-page",
+                            title: info.display || parsed.name,
+                            cid: "",
+                            sha256: "",
+                            verified: true,
+                            siteBase: parsed.siteBase,
+                            path: parsed.path,
+                            files: []
+                        }, info)
+                        return
+                    }
+                    openLoopbackForTab(tabId, navSeq, {
+                        kind: "lns",
+                        host: parsed.name,
+                        site_base: parsed.siteBase,
+                        mode: "onchain-page",
+                        html: pg.text,
+                        path: "/",
+                        backend: "memory",
+                        title: info.display || parsed.name
+                    }, info)
+                } else {
+                    browserWindow.attachTabNoSite(tabId, navSeq, info)
+                }
+            }, function(err) {
+                browserWindow.attachTabStorageError(tabId, navSeq, "", parsed.path, String(err || "Could not fetch on-chain page"))
+            })
+        }, function(err) {
+            browserWindow.attachTabStorageError(tabId, navSeq, "", parsed.path, String(err || "Could not resolve LNS name"))
+        })
     }
 
-    function renderHtmlSafely(rawHtml, meta) {
+    function openCidInLoopback(tabId, navSeq, parsed, cid, sha256, siteType, siteInfoObj) {
+        if (storageBackend === "basecamp") {
+            if (!basecampStorageReady) {
+                browserWindow.attachTabStorageError(tabId, navSeq, cid, parsed.path || "/", "Basecamp's Storage node is still starting. Start it in Settings or click Retry.")
+                if (!basecampStorageStarting) startBasecampStorage()
+                return
+            }
+            connectStoragePeers(function() {
+                openLoopbackForTab(tabId, navSeq, {
+                    kind: parsed.kind,
+                    host: parsed.kind === "lns" ? parsed.name : parsed.cid,
+                    site_base: parsed.siteBase,
+                    mode: "cid",
+                    root_cid: cid,
+                    root_sha256: sha256 || "",
+                    site_type: siteType || "",
+                    path: parsed.path || "/",
+                    backend: "basecamp",
+                    title: siteInfoObj ? siteInfoObj.display : ""
+                }, siteInfoObj)
+            })
+            return
+        }
+        if (storageBackend === "http" && storageApiInput.trim() !== "") {
+            openLoopbackForTab(tabId, navSeq, {
+                kind: parsed.kind,
+                host: parsed.kind === "lns" ? parsed.name : parsed.cid,
+                site_base: parsed.siteBase,
+                mode: "cid",
+                root_cid: cid,
+                root_sha256: sha256 || "",
+                site_type: siteType || "",
+                path: parsed.path || "/",
+                backend: "http",
+                storage_api: storageApiInput.trim(),
+                title: siteInfoObj ? siteInfoObj.display : ""
+            }, siteInfoObj)
+            return
+        }
+        if (storageBackend === "checking") {
+            browserWindow.attachTabStorageError(tabId, navSeq, cid, parsed.path || "/", "Logos Storage is still initializing. Wait a moment and click Retry.")
+            return
+        }
+        browserWindow.attachTabStorageError(tabId, navSeq, cid, parsed.path || "/", "No Logos Storage module is installed in Basecamp and no external Storage node is configured.")
+    }
+
+    // ── Reader Mode (Zero-JS) Fetch & Render Pipeline ────────────────────
+    function folderEntriesToSidebar(dirPrefix, entries) {
+        var base = String(dirPrefix || "/").replace(/\/+$/, "")
+        var list = Logic.toArray(entries)
+        var out = []
+        for (var i = 0; i < list.length; i++) {
+            var e = list[i]
+            var suffix = e.kind === "dir" ? "/" : ""
+            out.push({
+                path: (base ? base + "/" : "/") + e.name + suffix,
+                name: e.name,
+                kind: e.kind,
+                cid: e.cid,
+                sha256: e.sha256 || ""
+            })
+        }
+        return out
+    }
+
+    function fetchCidPageReader(tabId, navSeq, cid, expectedSha256, siteBase, path, siteType, siteInfoObj) {
+        if (storageBackend === "basecamp") {
+            if (!basecampStorageReady) {
+                browserWindow.attachTabStorageError(tabId, navSeq, cid, path || "/", "Basecamp's Storage node is still starting. Start it in Settings or click Retry.")
+                if (!basecampStorageStarting) startBasecampStorage()
+                return
+            }
+            var cachedRoot = Logic.getCachedLinksEntry(linksCache, cid, expectedSha256 || "")
+            if (cachedRoot.mismatch) {
+                browserWindow.attachTabStorageError(tabId, navSeq, cid, path || "/", cachedRoot.error)
+                return
+            }
+            if (cachedRoot.hit) {
+                var rootPinVerified = !!expectedSha256 && cachedRoot.sha256 === String(expectedSha256).trim().toLowerCase()
+                connectStoragePeers(function() {
+                    if (tabId !== root.readerTabId || navSeq !== root.readerNavSeq) return
+                    startLinksWalkReader(tabId, navSeq, cachedRoot.list, siteBase, path || "/", cid, cachedRoot.sha256, rootPinVerified, siteInfoObj)
+                })
+                return
+            }
+            connectStoragePeers(function() {
+                if (tabId !== root.readerTabId || navSeq !== root.readerNavSeq) return
+                startBasecampDownload(tabId, navSeq, cid, expectedSha256, siteBase, path, null, false, {
+                    purpose: siteType === "links" ? "links_dir" : "page",
+                    siteType: siteType || "",
+                    requestedPath: path || "/"
+                })
+            })
+            return
+        }
+        if (storageBackend === "http" && storageApiInput.trim() !== "") {
+            callCore("lns_browser_core", "fetch_site", [cid, expectedSha256 || "", siteBase, path || "/"], function(data) {
+                if (tabId !== root.readerTabId || navSeq !== root.readerNavSeq) return
+                if (data && data.not_found) {
+                    browserWindow.attachTabNotFound(tabId, navSeq, data.path || path || "/", siteBase, !!data.single_page)
+                    return
+                }
+                readerPageData = data
+                browserWindow.attachReaderPage(tabId, navSeq, data, siteInfoObj)
+            }, function(err) {
+                if (tabId !== root.readerTabId || navSeq !== root.readerNavSeq) return
+                browserWindow.attachTabStorageError(tabId, navSeq, cid, path || "/", err)
+            }, 45000)
+            return
+        }
+        browserWindow.attachTabStorageError(tabId, navSeq, cid, path || "/", "No Logos Storage module is installed in Basecamp and no external Storage node is configured.")
+    }
+
+    function renderHtmlSafelyReader(tabId, navSeq, rawHtml, meta, siteInfoObj) {
         var normFiles = Logic.toArray(meta.files)
         callCore("lns_browser_core", "render_html", [rawHtml, meta.siteBase, meta.path || "/"], function(rendered) {
-            loading = false
-            pageData = Object.assign({}, rendered, {
+            if (tabId !== root.readerTabId || navSeq !== root.readerNavSeq) return
+            var pd = Object.assign({}, rendered, {
                 mode: meta.mode || rendered.mode,
                 cid: meta.cid || "",
                 sha256: meta.sha256 || "",
                 verified: !!meta.verified,
                 blocks: Logic.toArray(rendered && rendered.blocks),
+                downloads: Logic.toArray(rendered && rendered.downloads),
                 files: normFiles
             })
-            filesOpen = normFiles.length > 1
+            readerPageData = pd
+            browserWindow.attachReaderPage(tabId, navSeq, pd, siteInfoObj)
+            queuePageImages()
         }, function() {
-            // Older lns_browser_core without render_html: use safe JS fallback with colors + SVG + https://
-            var clean = Logic.sanitizeHtmlFallback(rawHtml, meta.siteBase)
-            loading = false
-            pageData = {
+            if (tabId !== root.readerTabId || navSeq !== root.readerNavSeq) return
+            var clean = Logic.sanitizeHtmlFallback(rawHtml, meta.siteBase, meta.path || "/")
+            var pd = {
                 mode: meta.mode || "single",
                 kind: "html",
                 title: clean.title || meta.title || "",
@@ -620,39 +1026,252 @@ Item {
                 fg_color: clean.fg_color,
                 link_color: clean.link_color,
                 blocks: Logic.toArray(clean.blocks),
+                downloads: Logic.toArray(clean.downloads),
                 files: normFiles
             }
-            filesOpen = normFiles.length > 1
+            readerPageData = pd
+            browserWindow.attachReaderPage(tabId, navSeq, pd, siteInfoObj)
+            queuePageImages()
         })
     }
 
+    function startLinksWalkReader(tabId, navSeq, rootList, siteBase, rawPath, rootCid, rootSha256, rootVerified, siteInfoObj) {
+        activeRootList = rootList
+        var norm = Logic.normalizePath(rawPath || "/")
+        if (!norm.ok) {
+            browserWindow.attachTabStorageError(tabId, navSeq, rootCid || "", rawPath || "/", norm.error)
+            return
+        }
+        activeWalk = {
+            tabId: tabId,
+            navSeq: navSeq,
+            siteBase: siteBase,
+            siteInfo: siteInfoObj,
+            rootCid: rootCid || "",
+            rootSha256: rootSha256 || "",
+            rootVerified: !!rootVerified,
+            segments: norm.segments,
+            trailingSlash: norm.trailingSlash,
+            stepIndex: 0,
+            requestedPath: norm.path,
+            depth: 0
+        }
+        advanceLinksWalk(rootList)
+    }
+
+    function advanceLinksWalk(list) {
+        var walk = activeWalk
+        if (!walk) return
+        var step = Logic.stepLinksResolve(list, walk.segments, walk.stepIndex, walk.trailingSlash)
+        if (step.action === "not_found") {
+            activeWalk = null
+            browserWindow.attachTabNotFound(walk.tabId, walk.navSeq, walk.requestedPath, walk.siteBase, false)
+            return
+        }
+        if (step.action === "fetch_dir") {
+            walk.depth += 1
+            if (walk.depth > Logic.MAX_LINKS_DEPTH) {
+                activeWalk = null
+                browserWindow.attachTabStorageError(walk.tabId, walk.navSeq, step.cid, walk.requestedPath, "Folder nesting exceeds limit")
+                return
+            }
+            walk.stepIndex = step.nextIndex
+            if (!step.sha256) walk.rootVerified = false
+            var cachedSub = Logic.getCachedLinksEntry(linksCache, step.cid, step.sha256 || "")
+            if (cachedSub.mismatch) {
+                activeWalk = null
+                browserWindow.attachTabStorageError(walk.tabId, walk.navSeq, step.cid, walk.requestedPath, cachedSub.error)
+                return
+            }
+            if (cachedSub.hit) {
+                advanceLinksWalk(cachedSub.list)
+                return
+            }
+            startBasecampDownload(walk.tabId, walk.navSeq, step.cid, step.sha256 || "", walk.siteBase, walk.requestedPath, null, walk.rootVerified, {
+                purpose: "links_dir",
+                requestedPath: walk.requestedPath
+            })
+            return
+        }
+        activeWalk = null
+        var sidebarFiles = folderEntriesToSidebar(step.canonicalDir, step.folderEntries)
+        if (Logic.isBinaryDownloadPath(step.resolvedPath)) {
+            var binPd = {
+                mode: "links",
+                kind: "binary",
+                can_save: true,
+                filename: step.entry.name,
+                title: step.entry.name,
+                path: step.resolvedPath,
+                cid: step.entry.cid,
+                sha256: step.entry.sha256 || "",
+                verified: walk.rootVerified && !!step.entry.sha256,
+                html: "<p>Binary download: <code>" + Logic.escapeHtml(step.entry.name) + "</code></p>",
+                blocks: [],
+                downloads: [{
+                    href: "cid://" + step.entry.cid,
+                    cid: step.entry.cid,
+                    sha256: step.entry.sha256 || "",
+                    path: step.resolvedPath,
+                    filename: step.entry.name,
+                    label: step.entry.name
+                }],
+                files: sidebarFiles
+            }
+            readerPageData = binPd
+            browserWindow.attachReaderPage(walk.tabId, walk.navSeq, binPd, walk.siteInfo)
+            return
+        }
+        startBasecampDownload(walk.tabId, walk.navSeq, step.entry.cid, step.entry.sha256 || "", walk.siteBase, step.resolvedPath, sidebarFiles, walk.rootVerified, {
+            purpose: "page",
+            fromLinks: true,
+            requestedPath: walk.requestedPath,
+            folderTitle: step.folderTitle || ""
+        })
+    }
+
+    function startBasecampDownload(tabId, navSeq, cid, expectedSha256, siteBase, path, manifestFiles, rootVerified, opts) {
+        var extra = opts || {}
+        var purpose = extra.purpose || "page"
+        var maxBytes = (purpose === "links_dir" || purpose === "image_dir") ? Logic.MAX_LINKS_LIST_BYTES : (4 * 1024 * 1024)
+        activeDownload = {
+            tabId: tabId,
+            navSeq: navSeq,
+            cid: cid,
+            expectedSha256: expectedSha256 || "",
+            siteBase: siteBase,
+            path: path || "/",
+            requestedPath: extra.requestedPath || path || "/",
+            chunks: [],
+            receivedBytes: 0,
+            maxBytes: maxBytes,
+            manifestFiles: manifestFiles || null,
+            rootVerified: !!rootVerified,
+            purpose: purpose,
+            fromLinks: !!extra.fromLinks,
+            siteType: extra.siteType || "",
+            folderTitle: extra.folderTitle || "",
+            blockIndex: extra.blockIndex !== undefined ? extra.blockIndex : -1
+        }
+        downloadTimeoutTimer.restart()
+        callCore("lns_browser_core", "storage_download_chunks", [cid, "false", "65536", "false", "true"], function() {}, function(err) {
+            if (tabId !== root.readerTabId || navSeq !== root.readerNavSeq) return
+            downloadTimeoutTimer.stop()
+            var failedDl = activeDownload
+            activeDownload = null
+            if (failedDl && (failedDl.purpose === "image" || failedDl.purpose === "image_dir")) {
+                activeImageTask = null
+                fetchNextQueuedImage()
+                return
+            }
+            activeWalk = null
+            browserWindow.attachTabStorageError(tabId, navSeq, cid, extra.requestedPath || path || "/", err)
+        }, 30000)
+    }
+
     function finishBasecampDownload(dl) {
+        if (dl.tabId !== root.readerTabId || dl.navSeq !== root.readerNavSeq) return
         var allBytes = []
+        var maxBytes = dl.maxBytes || (4 * 1024 * 1024)
         for (var i = 0; i < dl.chunks.length; i++) {
             var part = Logic.base64ToBytes(dl.chunks[i])
+            if (allBytes.length + part.length > maxBytes) {
+                if (dl.purpose === "image" || dl.purpose === "image_dir") {
+                    activeImageTask = null
+                    fetchNextQueuedImage()
+                    return
+                }
+                activeWalk = null
+                browserWindow.attachTabStorageError(dl.tabId, dl.navSeq, dl.cid, dl.requestedPath || dl.path || "/", "Download exceeds limit of " + maxBytes + " bytes")
+                return
+            }
             for (var j = 0; j < part.length; j++) allBytes.push(part[j])
         }
         if (allBytes.length === 0) {
-            loading = false
-            pageData = null
-            problem = Logic.formatUnreachableCidError(dl.cid, "empty payload")
+            if (dl.purpose === "image" || dl.purpose === "image_dir") {
+                activeImageTask = null
+                fetchNextQueuedImage()
+                return
+            }
+            activeWalk = null
+            browserWindow.attachTabStorageError(dl.tabId, dl.navSeq, dl.cid, dl.requestedPath || dl.path || "/", "empty payload")
             return
         }
         var actualHash = Logic.sha256HexBytes(allBytes)
         var verified = false
         if (dl.expectedSha256 && dl.expectedSha256.length === 64) {
             if (actualHash !== dl.expectedSha256.toLowerCase()) {
-                loading = false
-                pageData = null
-                problem = "SHA-256 mismatch for CID " + Logic.shortHash(dl.cid) + ": on-chain expected " + Logic.shortHash(dl.expectedSha256) + ", got " + Logic.shortHash(actualHash)
+                if (dl.purpose === "image" || dl.purpose === "image_dir") {
+                    activeImageTask = null
+                    fetchNextQueuedImage()
+                    return
+                }
+                activeWalk = null
+                browserWindow.attachTabStorageError(
+                    dl.tabId,
+                    dl.navSeq,
+                    dl.cid,
+                    dl.requestedPath || dl.path || "/",
+                    "SHA-256 mismatch: expected " + Logic.shortHash(dl.expectedSha256) + ", got " + Logic.shortHash(actualHash)
+                )
                 return
             }
             verified = true
         }
-        var text = Logic.bytesToUtf8(allBytes)
 
-        // Check if this is a v1 site manifest (only on root fetch)
-        if (!dl.manifestFiles) {
+        if (dl.purpose === "image") {
+            var mime = Logic.sniffImageMimeBytes(allBytes)
+            if (mime) {
+                var uri = "data:" + mime + ";base64," + Logic.bytesToBase64(allBytes)
+                Logic.safeMapSet(imageCache, dl.cid, { uri: uri, sha256: actualHash })
+                applyImageDataUri(dl.blockIndex, uri)
+            }
+            activeImageTask = null
+            fetchNextQueuedImage()
+            return
+        }
+
+        if (dl.purpose === "image_dir") {
+            var imgDirUtf8 = Logic.bytesToUtf8Strict(allBytes)
+            if (imgDirUtf8.ok) {
+                var imgDir = Logic.parseLinksList(imgDirUtf8.text)
+                if (imgDir.ok) {
+                    Logic.safeMapSet(linksCache, dl.cid, { list: imgDir, sha256: actualHash })
+                    stepImageResolve(imgDir)
+                    return
+                }
+            }
+            activeImageTask = null
+            fetchNextQueuedImage()
+            return
+        }
+
+        var strictDecoded = Logic.bytesToUtf8Strict(allBytes)
+        var text = strictDecoded.ok ? strictDecoded.text : Logic.bytesToUtf8(allBytes)
+
+        if (dl.purpose === "links_dir" || (!dl.manifestFiles && !dl.fromLinks && (dl.siteType === "links" || (strictDecoded.ok && Logic.isLinksListText(strictDecoded.text))))) {
+            if (!strictDecoded.ok) {
+                activeWalk = null
+                browserWindow.attachTabStorageError(dl.tabId, dl.navSeq, dl.cid, dl.requestedPath || dl.path || "/", "invalid UTF-8 in lns-links/1 list: " + strictDecoded.error)
+                return
+            }
+            var parsedList = Logic.parseLinksList(strictDecoded.text)
+            if (!parsedList.ok) {
+                activeWalk = null
+                browserWindow.attachTabStorageError(dl.tabId, dl.navSeq, dl.cid, dl.requestedPath || dl.path || "/", "invalid lns-links/1 list: " + parsedList.error)
+                return
+            }
+            Logic.safeMapSet(linksCache, dl.cid, { list: parsedList, sha256: actualHash })
+            if (activeWalk === null) {
+                startLinksWalkReader(dl.tabId, dl.navSeq, parsedList, dl.siteBase, dl.path || "/", dl.cid, actualHash, verified, readerSiteInfo)
+            } else {
+                activeWalk.rootVerified = activeWalk.rootVerified && verified
+                advanceLinksWalk(parsedList)
+            }
+            return
+        }
+
+        if (!dl.manifestFiles && !dl.fromLinks) {
             var manifest = Logic.tryParseManifestJson(text)
             if (manifest) {
                 var filesList = []
@@ -660,153 +1279,138 @@ Item {
                     filesList.push({ path: p, cid: manifest.files[p].cid, sha256: manifest.files[p].sha256 || "" })
                 }
                 var wantPath = dl.path && dl.path !== "/" ? dl.path : (manifest.index || "/index.html")
-                var entry = manifest.files[wantPath] || manifest.files["/index.html"]
+                var entry = manifest.files[wantPath] || (wantPath.charAt(wantPath.length - 1) === "/" ? manifest.files[wantPath + "index.html"] : manifest.files[wantPath + "/index.html"])
                 if (!entry || !entry.cid) {
-                    loading = false
-                    pageData = null
-                    problem = wantPath + " not found in site manifest."
+                    browserWindow.attachTabNotFound(dl.tabId, dl.navSeq, wantPath, dl.siteBase, false)
                     return
                 }
-                startBasecampDownload(entry.cid, entry.sha256 || "", dl.siteBase, wantPath, filesList, verified)
+                startBasecampDownload(dl.tabId, dl.navSeq, entry.cid, entry.sha256 || "", dl.siteBase, wantPath, filesList, verified, {
+                    purpose: "page",
+                    requestedPath: wantPath
+                })
+                return
+            }
+            if (dl.path && dl.path !== "/" && dl.path !== "/index.html") {
+                browserWindow.attachTabNotFound(dl.tabId, dl.navSeq, dl.path, dl.siteBase, true)
                 return
             }
         }
 
-        renderHtmlSafely(text, {
-            mode: dl.manifestFiles ? "manifest" : "single",
+        renderHtmlSafelyReader(dl.tabId, dl.navSeq, text, {
+            mode: dl.fromLinks ? "links" : (dl.manifestFiles ? "manifest" : "single"),
+            title: dl.folderTitle || "",
             cid: dl.cid,
             sha256: actualHash,
-            verified: dl.manifestFiles ? (dl.rootVerified && verified) : verified,
+            verified: (dl.fromLinks || dl.manifestFiles) ? (dl.rootVerified && verified) : verified,
             siteBase: dl.siteBase,
             path: dl.path,
             files: dl.manifestFiles || []
-        })
+        }, readerSiteInfo)
     }
 
-    function startBasecampDownload(cid, expectedSha256, siteBase, path, manifestFiles, rootVerified) {
-        activeDownload = {
-            cid: cid,
-            expectedSha256: expectedSha256 || "",
-            siteBase: siteBase,
-            path: path || "/",
-            chunks: [],
-            manifestFiles: manifestFiles || null,
-            rootVerified: !!rootVerified
-        }
-        downloadTimeoutTimer.restart()
-        // Route through Rust core (`lns_browser_core.storage_download_chunks`) so `chunkSize: int`
-        // and booleans are passed with real Rust types via `logos-rust-sdk` (QML bridge refuses JS numbers for int).
-        callCore("lns_browser_core", "storage_download_chunks", [cid, "false", "65536", "false", "true"], function() {}, function(err) {
-            downloadTimeoutTimer.stop()
-            activeDownload = null
-            loading = false
-            pageData = null
-            problem = Logic.formatUnreachableCidError(cid, err)
-        }, 30000)
-    }
-
-    function navigate(raw, recordHistory) {
-        var shouldPush = recordHistory === undefined ? true : recordHistory
-        var parsed = Logic.parseUrl(raw)
-        if (!parsed.ok) {
-            problem = parsed.error
-            return
-        }
-        resolveRetryTimer.stop()
-        pendingResolve = null
-        parsedUrl = parsed
-        urlInput = parsed.canonical
-        problem = ""
-        notice = ""
-        pendingExternalUrl = ""
-        loading = true
-
-        if (shouldPush) pushHistory(parsed.canonical)
-
-        if (parsed.kind === "cid") {
-            siteInfo = { name: "", display: "Direct CID", bio: "", cid: parsed.cid, sha256: "", siteType: "", hasSite: true, texts: {} }
-            fetchCidPage(parsed.cid, "", parsed.siteBase, parsed.path)
-            return
-        }
-
-        resolveNameWithRetry(parsed.name, function(record) {
-            if (!record) {
-                loading = false
-                siteInfo = null
-                pageData = null
-                problem = "LNS name not registered on LEZ: " + parsed.name
-                return
-            }
-            var info = Logic.extractSiteInfo(record)
-            siteInfo = info
-            pubName = parsed.name
-            if (info.hasSite) {
-                fetchCidPage(info.cid, info.sha256, parsed.siteBase, parsed.path)
-                return
-            }
-            // Fallback: on-chain SetPage HTML stored directly on LEZ 0.4 (retry on busy:true like names.resolve)
-            pageNameWithRetry(parsed.name, function(pg) {
-                if (pg && pg.text && pg.text.length > 0) {
-                    renderHtmlSafely(pg.text, {
-                        mode: "onchain-page",
-                        title: info.display || parsed.name,
-                        cid: "",
-                        sha256: "",
-                        verified: true,
-                        siteBase: parsed.siteBase,
-                        path: parsed.path,
-                        files: []
-                    })
-                } else {
-                    loading = false
-                    pageData = null
+    function queuePageImages() {
+        if (storageBackend !== "basecamp" || !basecampStorageReady || !readerPageData) return
+        var blocks = Logic.toArray(readerPageData.blocks)
+        var queue = []
+        var changed = false
+        for (var i = 0; i < blocks.length; i++) {
+            var b = blocks[i]
+            if (!b || b.kind !== "image" || b.data_uri) continue
+            if (b.src_cid) {
+                var cachedImg = Logic.getCachedImageEntry(imageCache, b.src_cid, "")
+                if (cachedImg.hit) {
+                    blocks[i] = Object.assign({}, b, { data_uri: cachedImg.uri })
+                    changed = true
+                    continue
                 }
-            }, function(err) {
-                loading = false
-                pageData = null
-                if (err && String(err).toLowerCase().indexOf("busy") !== -1) problem = err
-            })
-        }, function(err) {
-            loading = false
-            problem = err
-            siteInfo = null
-            pageData = null
-        })
+            }
+            if (b.src_cid || (b.src_path && activeRootList)) {
+                queue.push({ blockIndex: i, srcCid: b.src_cid || "", srcPath: b.src_path || "" })
+            }
+        }
+        if (changed) {
+            readerPageData = Object.assign({}, readerPageData, { blocks: blocks })
+            browserWindow.attachReaderPage(readerTabId, readerNavSeq, readerPageData, readerSiteInfo)
+        }
+        pendingImages = queue
+        activeImageTask = null
+        fetchNextQueuedImage()
     }
 
-    function fetchCidPage(cid, expectedSha256, siteBase, path) {
-        if (storageBackend === "basecamp") {
-            if (!basecampStorageReady) {
-                loading = false
-                pageData = null
-                problem = "Basecamp's Storage node is still starting. Click 'Start Storage Node' in Settings or try again in a few seconds."
-                if (!basecampStorageStarting) startBasecampStorage()
+    function fetchNextQueuedImage() {
+        if (activeImageTask !== null || activeDownload !== null) return
+        if (!pendingImages || pendingImages.length === 0) return
+        var next = pendingImages.shift()
+        if (next.srcCid) {
+            var cachedImg = Logic.getCachedImageEntry(imageCache, next.srcCid, "")
+            if (cachedImg.hit) {
+                applyImageDataUri(next.blockIndex, cachedImg.uri)
+                fetchNextQueuedImage()
                 return
             }
-            // Workaround for upstream discovery bug (#1556): connect configured peers via Rust core before download
-            connectStoragePeers(function(_ok, connectErr) {
-                startBasecampDownload(cid, expectedSha256, siteBase, path, null, false)
-                if (connectErr) problem = connectErr
+            activeImageTask = { blockIndex: next.blockIndex, cid: next.srcCid, expectedSha256: "" }
+            startBasecampDownload(readerTabId, readerNavSeq, next.srcCid, "", readerSiteBase, next.srcPath || "/", null, false, {
+                purpose: "image",
+                blockIndex: next.blockIndex
             })
             return
         }
-        if (storageBackend === "http" && storageApiInput.trim() !== "") {
-            callCore("lns_browser_core", "fetch_site", [cid, expectedSha256 || "", siteBase, path || "/"], function(data) {
-                loading = false
-                pageData = data
-                filesOpen = Logic.toArray(data && data.files).length > 1
-            }, function(err) {
-                loading = false
-                pageData = null
-                problem = Logic.formatUnreachableCidError(cid, err)
-            }, 45000)
+        if (next.srcPath && activeRootList) {
+            var norm = Logic.normalizePath(next.srcPath)
+            if (!norm.ok) { fetchNextQueuedImage(); return }
+            activeImageTask = { blockIndex: next.blockIndex, segments: norm.segments, trailingSlash: norm.trailingSlash, stepIndex: 0, depth: 0 }
+            stepImageResolve(activeRootList)
             return
         }
-        loading = false
-        pageData = null
-        problem = "Cannot load CID " + Logic.shortHash(cid) + ": no Logos Storage module is installed in Basecamp and no external Storage node is configured. On-Chain HTML (≤ 78 KB) sites work without a storage node; to open CID sites, configure a real Logos Storage node in Settings."
+        fetchNextQueuedImage()
     }
 
+    function stepImageResolve(list) {
+        var task = activeImageTask
+        if (!task) return
+        var step = Logic.stepLinksResolve(list, task.segments, task.stepIndex, task.trailingSlash)
+        if (step.action === "found") {
+            var cachedImg = Logic.getCachedImageEntry(imageCache, step.entry.cid, step.entry.sha256 || "")
+            if (cachedImg.mismatch) { activeImageTask = null; fetchNextQueuedImage(); return }
+            if (cachedImg.hit) {
+                var idx = task.blockIndex
+                activeImageTask = null
+                applyImageDataUri(idx, cachedImg.uri)
+                fetchNextQueuedImage()
+                return
+            }
+            task.cid = step.entry.cid
+            task.expectedSha256 = step.entry.sha256 || ""
+            startBasecampDownload(readerTabId, readerNavSeq, step.entry.cid, step.entry.sha256 || "", readerSiteBase, step.resolvedPath, null, false, {
+                purpose: "image",
+                blockIndex: task.blockIndex
+            })
+            return
+        }
+        if (step.action === "fetch_dir") {
+            task.depth += 1
+            if (task.depth > Logic.MAX_LINKS_DEPTH) { activeImageTask = null; fetchNextQueuedImage(); return }
+            task.stepIndex = step.nextIndex
+            var cachedDir = Logic.getCachedLinksEntry(linksCache, step.cid, step.sha256 || "")
+            if (cachedDir.mismatch) { activeImageTask = null; fetchNextQueuedImage(); return }
+            if (cachedDir.hit) { stepImageResolve(cachedDir.list); return }
+            startBasecampDownload(readerTabId, readerNavSeq, step.cid, step.sha256 || "", readerSiteBase, "/" + task.segments.join("/"), null, false, { purpose: "image_dir" })
+            return
+        }
+        activeImageTask = null
+        fetchNextQueuedImage()
+    }
+
+    function applyImageDataUri(blockIndex, dataUri) {
+        if (!readerPageData || !dataUri) return
+        var blocks = Logic.toArray(readerPageData.blocks).slice()
+        if (blockIndex < 0 || blockIndex >= blocks.length) return
+        blocks[blockIndex] = Object.assign({}, blocks[blockIndex], { data_uri: dataUri })
+        readerPageData = Object.assign({}, readerPageData, { blocks: blocks })
+        browserWindow.attachReaderPage(readerTabId, readerNavSeq, readerPageData, readerSiteInfo)
+    }
+
+    // ── Publish & Settings (Preserved Intact) ────────────────────────────
     function handoffToNames(intentParams, summaryLabel) {
         lastDeepLink = Logic.buildPublishDeepLink(intentParams)
         if (!bridgeReady || !logos.request) {
@@ -821,7 +1425,7 @@ Item {
                 problem = ""
                 notice = "Published on-chain to lns://" + intentParams.name + "!"
                 publishOpen = false
-                navigate("lns://" + intentParams.name, true)
+                openInBrowserWindow("lns://" + intentParams.name)
             } else {
                 problem = err ? String(err) : "Publish was cancelled or refused in Names."
             }
@@ -848,25 +1452,16 @@ Item {
             }
 
             if (pubMode === "page") {
-                if (!pubHtml.trim()) {
-                    loading = false
-                    problem = "Paste HTML content first."
-                    return
-                }
+                if (!pubHtml.trim()) { loading = false; problem = "Paste HTML content first."; return }
                 if (Logic.utf8ToBytes(pubHtml).length > 78 * 1024) {
                     loading = false
                     problem = "HTML exceeds the 78 KB on-chain SetPage limit. Switch to Logos Storage CID mode."
                     return
                 }
-                handoffToNames({
-                    name: name,
-                    html: pubHtml,
-                    return_app: "lns_browser"
-                }, "Prepared on-chain HTML page.")
+                handoffToNames({ name: name, html: pubHtml, return_app: "lns_browser" }, "Prepared on-chain HTML page.")
                 return
             }
 
-            // CID publish MUST go to a real Logos Storage node (never a stand-in stub)
             if (storageBackend === "basecamp") {
                 if (!basecampStorageReady) {
                     loading = false
@@ -874,7 +1469,6 @@ Item {
                     return
                 }
                 if (pubLocalPath.trim().length > 0) {
-                    // Routed via Rust core so `chunkSize: int` & `advertise: bool` use real Rust types
                     callCore("lns_browser_core", "storage_upload_url", [pubLocalPath.trim(), "65536", "true"], function(sessionId) {
                         activeUpload = { sessionId: String(sessionId), name: name, sha256: "", mode: "url", sentChunk: true }
                         notice = "Uploading file to Basecamp Logos Storage (advertising to P2P network)..."
@@ -883,13 +1477,8 @@ Item {
                         problem = "Basecamp Storage upload failed: " + err
                     }, 30000)
                 } else {
-                    if (!pubHtml.trim()) {
-                        loading = false
-                        problem = "Paste HTML content or enter a file path first."
-                        return
-                    }
+                    if (!pubHtml.trim()) { loading = false; problem = "Paste HTML content or enter a file path first."; return }
                     var hashHex = Logic.sha256HexUtf8(pubHtml)
-                    // Routed via Rust core so `chunkSize: int` & `advertise: bool` use real Rust types
                     callCore("lns_browser_core", "storage_upload_init", ["index.html", "65536", "true"], function(sessionId) {
                         var sid = String(sessionId)
                         activeUpload = { sessionId: sid, name: name, sha256: hashHex, mode: "chunks", sentChunk: true }
@@ -910,17 +1499,13 @@ Item {
             if (storageBackend === "http" && storageApiInput.trim() !== "") {
                 if (storageInfo && storageInfo.mock) {
                     loading = false
-                    problem = "Refused to publish to the local stand-in mock (nobody else can open its CIDs). Use Basecamp's built-in Storage module, a real Logos Storage node, or On-Chain HTML (≤ 78 KB)."
+                    problem = "Refused to publish to the local stand-in mock. Use Basecamp's built-in Storage module, a real Logos Storage node, or On-Chain HTML."
                     return
                 }
                 var doneUpload = function(uploaded) {
                     lastPublished = uploaded
                     var built = Logic.buildProfileEntries(uploaded.root_cid, uploaded.sha256, uploaded.mode)
-                    if (!built.ok) {
-                        loading = false
-                        problem = built.error
-                        return
-                    }
+                    if (!built.ok) { loading = false; problem = built.error; return }
                     handoffToNames({
                         name: name,
                         cid: uploaded.root_cid,
@@ -931,13 +1516,11 @@ Item {
                 }
                 if (pubLocalPath.trim().length > 0) {
                     callCore("lns_browser_core", "publish_path", [pubLocalPath.trim(), pubTitle.trim()], doneUpload, function(err) {
-                        loading = false
-                        problem = err
+                        loading = false; problem = err
                     }, 120000)
                 } else {
                     callCore("lns_browser_core", "publish_html", [pubHtml, pubTitle.trim()], doneUpload, function(err) {
-                        loading = false
-                        problem = err
+                        loading = false; problem = err
                     }, 60000)
                 }
                 return
@@ -954,7 +1537,7 @@ Item {
     function saveSettings() {
         var trimmed = storageApiInput.trim()
         if (Logic.isPort8080Url(trimmed)) {
-            problem = "Port 8080 is used by the Logos Blockchain node, not Logos Storage. Leave blank to use Basecamp's built-in Storage module, or enter your real Logos Storage API port."
+            problem = "Port 8080 is used by the Logos Blockchain node, not Logos Storage."
             return
         }
         var peersParsed = Logic.parseStoragePeers(storagePeersInput)
@@ -966,18 +1549,15 @@ Item {
             storage_api: trimmed,
             storage_peers_text: peersParsed.peers.map(function(p) { return p.line }).join("\n")
         })
+        saveBrowserState({ reader_mode: defaultReaderMode })
         callCore("lns_browser_core", "config_set", [payload], function(v) {
             storageApiInput = v && v.storage_api ? v.storage_api : ""
             if (v && typeof v.storage_peers_text === "string") storagePeersInput = v.storage_peers_text
             problem = ""
             if (storageApiInput === "") {
                 storageBackend = basecampStorageInstalled ? "basecamp" : "none"
-                notice = basecampStorageInstalled
-                    ? "Saved settings (using Basecamp's built-in Logos Storage module)."
-                    : "Saved settings."
-                if (basecampStorageReady && peersParsed.peers.length > 0) {
-                    connectStoragePeers(null)
-                }
+                notice = basecampStorageInstalled ? "Saved settings (using Basecamp's built-in Logos Storage module)." : "Saved settings."
+                if (basecampStorageReady && peersParsed.peers.length > 0) connectStoragePeers(null)
             } else {
                 storageBackend = "http"
                 notice = "Saved settings (external Storage API: " + storageApiInput + ")."
@@ -989,174 +1569,121 @@ Item {
         })
     }
 
+    // ── Basecamp Tab Start Page UI (Zero WebView inside Basecamp tab) ────
     Rectangle {
         anchors.fill: parent
         color: root.slate
 
         ColumnLayout {
             anchors.fill: parent
-            anchors.margins: px(16)
-            spacing: px(12)
+            anchors.margins: px(18)
+            spacing: px(14)
 
-            // ── Browser Chrome Bar ──────────────────────────────────────
+            // Header Row
             RowLayout {
                 Layout.fillWidth: true
-                spacing: px(6)
+                spacing: px(8)
 
-                Rectangle {
-                    width: px(32); height: px(34); radius: px(7)
-                    color: root.raised; border.color: root.line
-                    opacity: root.historyIdx > 0 ? 1.0 : 0.4
-                    Text { anchors.centerIn: parent; text: "←"; color: root.ink; font.pixelSize: px(14) }
-                    MouseArea { anchors.fill: parent; enabled: root.historyIdx > 0; cursorShape: Qt.PointingHandCursor; onClicked: root.goBack() }
-                }
-                Rectangle {
-                    width: px(32); height: px(34); radius: px(7)
-                    color: root.raised; border.color: root.line
-                    opacity: (root.historyIdx >= 0 && root.historyIdx < root.history.length - 1) ? 1.0 : 0.4
-                    Text { anchors.centerIn: parent; text: "→"; color: root.ink; font.pixelSize: px(14) }
-                    MouseArea { anchors.fill: parent; enabled: root.historyIdx >= 0 && root.historyIdx < root.history.length - 1; cursorShape: Qt.PointingHandCursor; onClicked: root.goForward() }
-                }
-                Rectangle {
-                    width: px(32); height: px(34); radius: px(7)
-                    color: root.raised; border.color: root.line
-                    Text { anchors.centerIn: parent; text: "↻"; color: root.ink; font.pixelSize: px(14) }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.navigate(root.urlInput, false) }
-                }
-
-                Rectangle {
+                ColumnLayout {
                     Layout.fillWidth: true
-                    height: px(34)
-                    radius: px(8)
-                    color: root.card
-                    border.color: urlEdit.activeFocus ? root.brass : root.line
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: px(8)
-                        anchors.rightMargin: px(8)
-                        spacing: px(8)
-
-                        Rectangle {
-                            visible: !!root.pageData
-                            implicitWidth: badgeTxt.implicitWidth + px(12)
-                            height: px(20)
-                            radius: px(10)
-                            color: root.pageData && root.pageData.verified ? root.good : root.raised
-                            Text {
-                                id: badgeTxt
-                                anchors.centerIn: parent
-                                text: root.pageData && root.pageData.mode === "onchain-page"
-                                    ? "ON-CHAIN ✓"
-                                    : (root.pageData && root.pageData.verified ? "SHA-256 ✓" : "CID")
-                                color: root.pageData && root.pageData.verified ? root.slate : root.dim
-                                font.family: root.mono
-                                font.pixelSize: px(10)
-                                font.bold: true
-                            }
-                        }
-
-                        TextInput {
-                            id: urlEdit
-                            Layout.fillWidth: true
-                            verticalAlignment: TextInput.AlignVCenter
-                            color: root.ink
-                            font.family: root.mono
-                            font.pixelSize: px(13)
-                            text: root.urlInput
-                            onTextEdited: root.urlInput = text
-                            onAccepted: root.navigate(text)
-                        }
+                    spacing: 2
+                    Text { text: "LNS Browser"; color: root.ink; font.pixelSize: px(20); font.bold: true }
+                    Text {
+                        text: "Modern WebKit sites in their own window · Per-site loopback CSP · SHA-256 verified"
+                        color: root.dim; font.pixelSize: px(11)
                     }
                 }
 
                 Rectangle {
-                    width: px(56); height: px(34); radius: px(7); color: root.brass
-                    Text { anchors.centerIn: parent; text: root.loading ? "..." : "Go"; color: root.slate; font.bold: true; font.pixelSize: px(12) }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.navigate(root.urlInput) }
+                    implicitWidth: openWinTxt.implicitWidth + px(22); height: px(34); radius: px(8)
+                    color: root.brass
+                    Text {
+                        id: openWinTxt; anchors.centerIn: parent
+                        text: browserWindow.tabs.length > 0
+                            ? ("Open Browser Window (" + browserWindow.tabs.length + ")")
+                            : "Open Browser Window"
+                        color: root.slate; font.bold: true; font.pixelSize: px(12)
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: browserWindow.openAndRaise()
+                    }
                 }
 
                 Rectangle {
-                    width: px(74); height: px(34); radius: px(7)
+                    width: px(76); height: px(34); radius: px(8)
                     color: root.publishOpen ? root.brass : root.raised; border.color: root.line
                     Text { anchors.centerIn: parent; text: "Publish"; color: root.publishOpen ? root.slate : root.ink; font.bold: true; font.pixelSize: px(12) }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.publishOpen = !root.publishOpen; root.settingsOpen = false } }
                 }
 
                 Rectangle {
-                    width: px(74); height: px(34); radius: px(7)
+                    width: px(76); height: px(34); radius: px(8)
                     color: root.settingsOpen ? root.brass : root.raised; border.color: root.line
                     Text { anchors.centerIn: parent; text: "Settings"; color: root.settingsOpen ? root.slate : root.ink; font.pixelSize: px(12) }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.settingsOpen = !root.settingsOpen; root.publishOpen = false } }
                 }
             }
 
-            // ── External HTTPS Link Confirmation Bar ────────────────────
-            Rectangle {
-                visible: root.pendingExternalUrl.length > 0
+            // Start Page Address Box
+            RowLayout {
                 Layout.fillWidth: true
-                implicitHeight: extRow.implicitHeight + px(16)
-                radius: px(8)
-                color: root.card
-                border.color: root.brass
+                spacing: px(8)
 
-                RowLayout {
-                    id: extRow
-                    anchors.fill: parent
-                    anchors.margins: px(8)
-                    spacing: px(8)
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: px(40)
+                    radius: px(10)
+                    color: root.card
+                    border.color: startUrlEdit.activeFocus ? root.brass : root.line
 
-                    Text {
-                        Layout.fillWidth: true
-                        text: "External web link: " + root.pendingExternalUrl
+                    TextInput {
+                        id: startUrlEdit
+                        anchors.fill: parent
+                        anchors.leftMargin: px(12); anchors.rightMargin: px(12)
+                        verticalAlignment: TextInput.AlignVCenter
                         color: root.ink
                         font.family: root.mono
-                        font.pixelSize: px(11)
-                        elide: Text.ElideMiddle
-                    }
-                    Rectangle {
-                        implicitWidth: openExtTxt.implicitWidth + px(16); height: px(26); radius: px(6); color: root.brass
-                        Text { id: openExtTxt; anchors.centerIn: parent; text: "Open in Browser"; color: root.slate; font.bold: true; font.pixelSize: px(11) }
-                        MouseArea {
-                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                            onClicked: root.openExternalUrl(root.pendingExternalUrl)
+                        font.pixelSize: px(13)
+                        selectByMouse: true
+                        text: root.startUrlInput
+                        onTextEdited: root.startUrlInput = text
+                        onAccepted: root.openInBrowserWindow(text)
+
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: startUrlEdit.text.length === 0
+                            text: "Enter LNS address (nameswallet/browser, lns://helloworld, cid://...)"
+                            color: root.dim
+                            font.family: root.mono
+                            font.pixelSize: px(12)
                         }
                     }
-                    Rectangle {
-                        implicitWidth: copyExtTxt.implicitWidth + px(14); height: px(26); radius: px(6); color: root.raised; border.color: root.line
-                        Text { id: copyExtTxt; anchors.centerIn: parent; text: "Copy Link"; color: root.ink; font.pixelSize: px(11) }
-                        MouseArea {
-                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                            onClicked: { root.copyText(root.pendingExternalUrl); root.notice = "Copied " + root.pendingExternalUrl + " — paste it into your browser." }
-                        }
-                    }
-                    Rectangle {
-                        implicitWidth: px(26); height: px(26); radius: px(6); color: root.raised; border.color: root.line
-                        Text { anchors.centerIn: parent; text: "✕"; color: root.dim; font.pixelSize: px(11) }
-                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.pendingExternalUrl = "" }
+                }
+
+                Rectangle {
+                    width: px(78); height: px(40); radius: px(10); color: root.brass
+                    Text { anchors.centerIn: parent; text: "Open"; color: root.slate; font.bold: true; font.pixelSize: px(13) }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: root.openInBrowserWindow(root.startUrlInput)
                     }
                 }
             }
 
-            // ── Status / Error Strip ────────────────────────────────────
+            // Status / Error Strip
             Text {
                 visible: root.problem.length > 0
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: root.problem
-                color: root.alarm
-                font.pixelSize: px(12)
+                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                text: root.problem; color: root.alarm; font.pixelSize: px(12)
             }
             Text {
                 visible: root.notice.length > 0
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: root.notice
-                color: root.good
-                font.pixelSize: px(12)
+                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                text: root.notice; color: root.good; font.pixelSize: px(12)
             }
 
-            // ── Settings Panel ──────────────────────────────────────────
+            // Settings Panel
             Rectangle {
                 visible: root.settingsOpen
                 Layout.fillWidth: true
@@ -1167,12 +1694,29 @@ Item {
                     id: cfgCol
                     anchors.fill: parent; anchors.margins: px(12); spacing: px(8)
 
-                    Text { text: "Logos Storage Node"; color: root.ink; font.bold: true; font.pixelSize: px(13) }
+                    Text { text: "Browser & Logos Storage Settings"; color: root.ink; font.bold: true; font.pixelSize: px(13) }
+                    RowLayout {
+                        spacing: px(8)
+                        Rectangle {
+                            implicitWidth: rmPrefTxt.implicitWidth + px(16); height: px(28); radius: px(6)
+                            color: root.defaultReaderMode ? root.brass : root.raised; border.color: root.line
+                            Text {
+                                id: rmPrefTxt; anchors.centerIn: parent
+                                text: root.defaultReaderMode ? "Default Mode: Reader (JS Off)" : "Default Mode: WebKit (Sterilised JS On)"
+                                color: root.defaultReaderMode ? root.slate : root.ink; font.pixelSize: px(11); font.bold: true
+                            }
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: root.defaultReaderMode = !root.defaultReaderMode
+                            }
+                        }
+                    }
+
                     Text {
                         Layout.fillWidth: true; wrapMode: Text.WordWrap; color: root.dim; font.pixelSize: px(11)
                         text: root.basecampStorageInstalled
                             ? ("Basecamp's built-in Logos Storage module is installed (" + (root.basecampStorageRunning ? "running" : "stopped") + "). It is used automatically unless you enter an external Storage API URL below.")
-                            : "No Logos Storage module is installed in this Basecamp build. You can still browse and publish On-Chain HTML (≤ 78 KB) sites directly on LEZ 0.4 with no storage node. For CID sites, enter a real Logos Storage node URL below (port 8080 is Logos Blockchain, not Storage)."
+                            : "No Logos Storage module is installed in this Basecamp build. On-Chain HTML (≤ 78 KB) works now; for CID sites, enter a real Logos Storage node URL below (port 8080 is Logos Blockchain, not Storage)."
                     }
                     RowLayout {
                         visible: root.basecampStorageInstalled
@@ -1191,9 +1735,9 @@ Item {
                         }
                     }
 
-                    Text { text: "Storage peers (one per line: peerId /ip4/…/tcp/… — stored locally, workaround for discovery #1556):"; color: root.dim; font.pixelSize: px(11); wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                    Text { text: "Storage peers (one per line: peerId /ip4/…/tcp/… — workaround for discovery #1556):"; color: root.dim; font.pixelSize: px(11); wrapMode: Text.WordWrap; Layout.fillWidth: true }
                     Rectangle {
-                        Layout.fillWidth: true; height: px(76); radius: px(6); color: root.slate; border.color: root.line
+                        Layout.fillWidth: true; height: px(72); radius: px(6); color: root.slate; border.color: root.line
                         Flickable {
                             anchors.fill: parent; anchors.margins: px(6); contentHeight: peersEdit.implicitHeight; clip: true
                             TextEdit {
@@ -1235,7 +1779,7 @@ Item {
                 }
             }
 
-            // ── Publish Panel (Real Logos Storage CID or On-Chain SetPage → Names Deep Link) ──
+            // Publish Panel
             Rectangle {
                 visible: root.publishOpen
                 Layout.fillWidth: true
@@ -1264,12 +1808,6 @@ Item {
                         }
                     }
 
-                    Text {
-                        visible: root.pubMode === "cid" && root.storageBackend === "none"
-                        Layout.fillWidth: true; wrapMode: Text.WordWrap; color: root.alarm; font.pixelSize: px(11)
-                        text: "No Logos Storage module is installed in Basecamp and no external Storage node is configured. Use On-Chain HTML (≤ 78 KB) above so anyone can open your page right away, or set a real Logos Storage node in Settings."
-                    }
-
                     RowLayout {
                         Layout.fillWidth: true; spacing: px(8)
                         Text { text: "LNS Name:"; color: root.dim; font.pixelSize: px(12); Layout.preferredWidth: px(80) }
@@ -1291,12 +1829,12 @@ Item {
 
                     Text {
                         text: root.pubMode === "cid"
-                            ? "Or paste HTML directly (uploaded to a real Logos Storage node when File path is blank):"
-                            : ("HTML stored directly on LEZ (" + Logic.utf8ToBytes(root.pubHtml).length + " / 79,872 bytes — readable by everyone without a storage node):")
+                            ? "Or paste HTML directly (uploaded to Logos Storage when File path is blank):"
+                            : ("HTML stored directly on LEZ (" + Logic.utf8ToBytes(root.pubHtml).length + " / 79,872 bytes):")
                         color: root.dim; font.pixelSize: px(11); wrapMode: Text.WordWrap; Layout.fillWidth: true
                     }
                     Rectangle {
-                        Layout.fillWidth: true; height: px(110); radius: px(6); color: root.slate; border.color: root.line
+                        Layout.fillWidth: true; height: px(104); radius: px(6); color: root.slate; border.color: root.line
                         Flickable {
                             anchors.fill: parent; anchors.margins: px(6); contentHeight: htmlEdit.implicitHeight; clip: true
                             TextEdit {
@@ -1313,11 +1851,8 @@ Item {
                         Rectangle {
                             implicitWidth: pubBtnTxt.implicitWidth + px(24); height: px(34); radius: px(7); color: root.brass
                             Text {
-                                id: pubBtnTxt
-                                anchors.centerIn: parent
-                                text: root.loading
-                                    ? "Publishing..."
-                                    : (root.pubMode === "cid" ? "Upload to Logos Storage & Publish" : "Publish On-Chain in Names")
+                                id: pubBtnTxt; anchors.centerIn: parent
+                                text: root.loading ? "Publishing..." : (root.pubMode === "cid" ? "Upload to Logos Storage & Publish" : "Publish On-Chain in Names")
                                 color: root.slate; font.bold: true; font.pixelSize: px(12)
                             }
                             MouseArea { anchors.fill: parent; enabled: !root.loading; cursorShape: Qt.PointingHandCursor; onClicked: root.publishAndBind() }
@@ -1332,158 +1867,165 @@ Item {
                 }
             }
 
-            // ── Main Content Area ───────────────────────────────────────
-            RowLayout {
+            // Start Page Main Content: Recently Opened Sites, Bookmarks, History
+            Flickable {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                spacing: px(12)
+                contentWidth: width
+                contentHeight: startContentCol.implicitHeight
+                clip: true
 
-                Rectangle {
-                    visible: root.filesOpen && !!root.pageData && Logic.toArray(root.pageData.files).length > 0
-                    Layout.preferredWidth: px(210)
-                    Layout.fillHeight: true
-                    radius: px(10); color: root.card; border.color: root.line
+                ColumnLayout {
+                    id: startContentCol
+                    width: parent.width
+                    spacing: px(18)
 
+                    // Recently Opened Sites (or quick-start suggestions when empty)
                     ColumnLayout {
-                        anchors.fill: parent; anchors.margins: px(10); spacing: px(6)
-                        Text { text: "Site Files"; color: root.dim; font.bold: true; font.pixelSize: px(12) }
+                        Layout.fillWidth: true
+                        spacing: px(8)
 
-                        ListView {
-                            Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: px(4)
-                            model: root.pageData ? Logic.toArray(root.pageData.files) : []
-                            delegate: Rectangle {
-                                width: ListView.view.width; height: px(28); radius: px(6)
-                                color: (root.pageData && root.pageData.path === modelData.path) ? root.raised : "transparent"
-                                Text {
-                                    anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; anchors.leftMargin: px(8)
-                                    text: modelData.path; color: root.ink; font.family: root.mono; font.pixelSize: px(11); elide: Text.ElideMiddle
-                                }
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                    onClicked: { if (root.parsedUrl) root.navigate(root.parsedUrl.siteBase + modelData.path) }
+                        Text {
+                            text: root.recentSites.length > 0 ? "Recently Opened Sites" : "Quick Open"
+                            color: root.dim; font.bold: true; font.pixelSize: px(12)
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: px(8)
+
+                            Repeater {
+                                model: root.recentSites.length > 0
+                                    ? root.recentSites
+                                    : [
+                                        { siteBase: "lns://nameswallet", title: "Names Wallet" },
+                                        { siteBase: "lns://nameswallet/browser/", title: "Names Wallet / Browser" },
+                                        { siteBase: "lns://helloworld", title: "Hello World" }
+                                    ]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    implicitWidth: Math.max(px(160), recCardCol.implicitWidth + px(24))
+                                    height: px(54)
+                                    radius: px(10)
+                                    color: root.card
+                                    border.color: root.line
+
+                                    ColumnLayout {
+                                        id: recCardCol
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.left: parent.left; anchors.right: parent.right
+                                        anchors.margins: px(10)
+                                        spacing: 2
+                                        Text { text: modelData.title || modelData.siteBase; color: root.ink; font.bold: true; font.pixelSize: px(12); elide: Text.ElideRight }
+                                        Text { text: modelData.siteBase; color: root.dim; font.family: root.mono; font.pixelSize: px(11); elide: Text.ElideMiddle }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.openInBrowserWindow(modelData.siteBase)
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Native Zero-JS, Zero-Network-Leak Page Viewport
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    radius: px(12)
-                    color: root.pageBg
-                    border.color: root.line
+                    // Bookmarks & History Two-Column Section
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: px(14)
 
-                    Flickable {
-                        anchors.fill: parent
-                        anchors.margins: px(24)
-                        contentWidth: width
-                        contentHeight: pageCol.implicitHeight
-                        clip: true
+                        // Bookmarks Card
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignTop
+                            implicitHeight: bmCardCol.implicitHeight + px(24)
+                            radius: px(10); color: root.card; border.color: root.line
 
-                        ColumnLayout {
-                            id: pageCol
-                            width: Math.min(parent.width, px(780))
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            spacing: px(12)
+                            ColumnLayout {
+                                id: bmCardCol
+                                anchors.fill: parent; anchors.margins: px(12); spacing: px(8)
 
-                            Text {
-                                visible: !!root.pageData
-                                text: root.pageData
-                                    ? (root.pageData.mode === "onchain-page"
-                                        ? "Stored directly on LEZ · verified on-chain"
-                                        : ("CID: " + Logic.shortHash(root.pageData.cid, 12, 8) + "  ·  SHA-256: " + Logic.shortHash(root.pageData.sha256, 10, 8) + (root.pageData.verified ? "  ·  verified on-chain" : "")))
-                                    : ""
-                                color: root.pageDim
-                                font.family: root.mono
-                                font.pixelSize: px(11)
-                                wrapMode: Text.WrapAnywhere
-                                Layout.fillWidth: true
-                            }
-
-                            Repeater {
-                                model: (root.pageData && Logic.toArray(root.pageData.blocks).length > 0)
-                                    ? Logic.toArray(root.pageData.blocks)
-                                    : (root.pageData && root.pageData.html ? [{ kind: "html", html: root.pageData.html }] : [])
-
-                                delegate: Item {
-                                    required property var modelData
-                                    Layout.fillWidth: true
-                                    implicitHeight: modelData.kind === "svg"
-                                        ? svgCanvas.height
-                                        : (modelData.kind === "image" ? imgItem.height : txtItem.implicitHeight)
-
-                                    Canvas {
-                                        id: svgCanvas
-                                        property var svgBlock: modelData
-                                        visible: modelData.kind === "svg"
-                                        width: Math.min(parent.width, modelData.width ? px(modelData.width) : parent.width)
-                                        height: (modelData.vb_w && modelData.vb_h && modelData.vb_w > 0)
-                                            ? Math.max(px(24), Math.round(width * modelData.vb_h / modelData.vb_w))
-                                            : px(100)
-                                        renderStrategy: Canvas.Cooperative
-                                        onPaint: {
-                                            if (!visible || !modelData || modelData.kind !== "svg") return
-                                            var ctx = getContext("2d")
-                                            Logic.drawSvgToCanvas(ctx, modelData, width, height)
+                                Text { text: "Bookmarks (" + root.bookmarks.length + ")"; color: root.ink; font.bold: true; font.pixelSize: px(13) }
+                                Text {
+                                    visible: root.bookmarks.length === 0
+                                    text: "No bookmarks yet. Click the ☆ star in the browser window's address bar to save a site."
+                                    color: root.dim; font.pixelSize: px(11); wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                }
+                                Repeater {
+                                    model: root.bookmarks
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        Layout.fillWidth: true; height: px(38); radius: px(7)
+                                        color: root.slate; border.color: root.line
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: px(10); anchors.rightMargin: px(6); spacing: px(6)
+                                            Text { text: "★"; color: root.brass; font.pixelSize: px(12) }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true; spacing: 1
+                                                Text { Layout.fillWidth: true; text: modelData.title || modelData.url; color: root.ink; font.pixelSize: px(11); font.bold: true; elide: Text.ElideRight }
+                                                Text { Layout.fillWidth: true; text: modelData.url; color: root.dim; font.family: root.mono; font.pixelSize: px(10); elide: Text.ElideMiddle }
+                                            }
+                                            Rectangle {
+                                                width: px(22); height: px(22); radius: px(4); color: "transparent"
+                                                Text { anchors.centerIn: parent; text: "✕"; color: root.dim; font.pixelSize: px(10) }
+                                                MouseArea {
+                                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: function(mouse) { mouse.accepted = true; root.removeBookmarkUrl(modelData.url) }
+                                                }
+                                            }
                                         }
-                                        onAvailableChanged: if (available && visible) requestPaint()
-                                        onSvgBlockChanged: if (visible) requestPaint()
-                                        onWidthChanged: if (visible) requestPaint()
-                                        onHeightChanged: if (visible) requestPaint()
-                                        Component.onCompleted: if (visible) requestPaint()
-                                    }
-
-                                    Image {
-                                        id: imgItem
-                                        visible: modelData.kind === "image"
-                                        width: Math.min(parent.width, modelData.width ? px(modelData.width) : parent.width)
-                                        height: (modelData.width && modelData.height && modelData.width > 0)
-                                            ? Math.round(width * modelData.height / modelData.width)
-                                            : implicitHeight
-                                        source: modelData.kind === "image" && modelData.data_uri ? modelData.data_uri : ""
-                                        fillMode: Image.PreserveAspectFit
-                                        smooth: false
-                                        asynchronous: false
-                                    }
-
-                                    Text {
-                                        id: txtItem
-                                        visible: modelData.kind !== "image" && modelData.kind !== "svg"
-                                        width: parent.width
-                                        textFormat: Text.RichText
-                                        wrapMode: Text.WordWrap
-                                        color: root.pageFg
-                                        linkColor: root.pageLink
-                                        font.family: root.sans
-                                        font.pixelSize: px(15)
-                                        lineHeight: 1.45
-                                        text: modelData.html ? modelData.html : ""
-                                        onLinkActivated: function(link) { root.activateLink(link) }
+                                        MouseArea {
+                                            anchors.fill: parent; anchors.rightMargin: px(28); cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.openInBrowserWindow(modelData.url)
+                                        }
                                     }
                                 }
                             }
+                        }
 
-                            // Fallback when an LNS name exists but has no CID or on-chain page yet
-                            ColumnLayout {
-                                visible: !root.pageData && !!root.siteInfo && !root.siteInfo.hasSite
-                                Layout.fillWidth: true
-                                spacing: px(8)
-                                Text { text: root.siteInfo ? root.siteInfo.display : ""; color: root.ink; font.pixelSize: px(18); font.bold: true }
-                                Text { visible: !!root.siteInfo && root.siteInfo.bio.length > 0; text: root.siteInfo ? root.siteInfo.bio : ""; color: root.dim; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                                Text { text: "This LNS name has no website published yet. Click Publish to bind one."; color: root.dim; font.pixelSize: px(12) }
-                            }
+                        // History Card
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignTop
+                            implicitHeight: histCardCol.implicitHeight + px(24)
+                            radius: px(10); color: root.card; border.color: root.line
 
-                            // Home / empty state
                             ColumnLayout {
-                                visible: !root.pageData && !root.siteInfo
-                                Layout.fillWidth: true
-                                spacing: px(10)
-                                Text { text: "Logos Native LNS Browser"; color: root.ink; font.pixelSize: px(20); font.bold: true }
+                                id: histCardCol
+                                anchors.fill: parent; anchors.margins: px(12); spacing: px(8)
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Text { text: "History (" + root.browsingHistory.length + ")"; color: root.ink; font.bold: true; font.pixelSize: px(13); Layout.fillWidth: true }
+                                    Rectangle {
+                                        visible: root.browsingHistory.length > 0
+                                        implicitWidth: spClearTxt.implicitWidth + px(12); height: px(24); radius: px(5)
+                                        color: root.raised; border.color: root.line
+                                        Text { id: spClearTxt; anchors.centerIn: parent; text: "Clear"; color: root.dim; font.pixelSize: px(10) }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.clearBrowsingHistory() }
+                                    }
+                                }
                                 Text {
-                                    Layout.fillWidth: true; wrapMode: Text.WordWrap; color: root.dim; font.pixelSize: px(13)
-                                    text: "Browse lns://<name> sites natively inside Basecamp. Content is fetched from LEZ or Logos Storage (via Basecamp's built-in Storage module), verified on-chain, and rendered with zero JavaScript and zero external network connections."
+                                    visible: root.browsingHistory.length === 0
+                                    text: "No browsing history yet. Sites you open appear here automatically."
+                                    color: root.dim; font.pixelSize: px(11); wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                }
+                                Repeater {
+                                    model: root.browsingHistory.slice(0, 15)
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        Layout.fillWidth: true; height: px(38); radius: px(7)
+                                        color: root.slate; border.color: root.line
+                                        ColumnLayout {
+                                            anchors.fill: parent; anchors.margins: px(6); spacing: 1
+                                            Text { Layout.fillWidth: true; text: modelData.title || modelData.url; color: root.ink; font.pixelSize: px(11); font.bold: true; elide: Text.ElideRight }
+                                            Text { Layout.fillWidth: true; text: modelData.url; color: root.dim; font.family: root.mono; font.pixelSize: px(10); elide: Text.ElideMiddle }
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.openInBrowserWindow(modelData.url)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1491,7 +2033,7 @@ Item {
                 }
             }
 
-            // ── Bottom Status Bar ───────────────────────────────────────
+            // Bottom Status Bar
             RowLayout {
                 Layout.fillWidth: true
                 Text {
@@ -1516,7 +2058,7 @@ Item {
                 }
                 Item { Layout.fillWidth: true }
                 Text {
-                    text: "In-Basecamp sandbox · Zero JS · Click-to-confirm https://"
+                    text: "Own-window WebKit · Sterilised JS · Loopback CSP · Click-to-confirm https://"
                     color: root.dim
                     font.family: root.mono
                     font.pixelSize: px(11)

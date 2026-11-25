@@ -33,7 +33,20 @@ node src/cli.js resolve lns://jef
 npm test
 ```
 
-## Basecamp App (`basecamp/` v0.2.8 + `basecamp-module/` v0.1.8)
+## Basecamp App (`basecamp/` v0.3.0 + `basecamp-module/` v0.2.0)
+
+- **New in 0.3.0 / core 0.2.0:** pages open in their own **browser window** (a normal resizable
+  macOS window with address bar, tabs, back/forward, verified badge, find, zoom, Reader Mode) rendered
+  by **WebKit** (QtWebView): full CSS, web fonts and **locked-down JavaScript**. A loopback server in
+  `lns_browser_core` (`rust-lib/src/server.rs`, 127.0.0.1 only, one port and random token per site)
+  serves only files checked by CID/SHA-256, with a strict Content-Security-Policy header (no outside
+  network, no forms, no frames), no cookies, no localStorage and no wallet access. The Basecamp tab is
+  the start page (address box, bookmarks, history, recent sites). Known limit: a script can still
+  navigate the top-level page to an outside URL; the browser stops it, but Qt's WebView reports the
+  navigation only after the request has started. WebKit cannot live inside a Basecamp tab because
+  Basecamp hosts apps in a QQuickWidget (logos-co/logos-basecamp#574).
+- **Multi-page sites:** per-folder `lns-links/1` lists (`cid.type = links`), each file and folder
+  list its own CID; addresses like `nameswallet/browser`. Publisher and gateway: [`lns-gateway/`](./lns-gateway).
 
 - `lns_browser` (`ui_qml`) + `lns_browser_core` (Rust core module) built with `logos-module-builder`.
 - Resolves `lns://` URLs via `names.resolve` and on-chain `SetPage` HTML (`names.page`, ≤ 78 KB) on LEZ 0.4, automatically retrying both on `busy: true` (every 1 s, up to 20 s).

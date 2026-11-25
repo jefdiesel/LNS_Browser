@@ -11,11 +11,20 @@ Every `lns://<name>` site uses one of two content-verified hosting modes on **LE
 | Mode | Where bytes live | Size limit | Best for | On-chain fields |
 | --- | --- | --- | --- | --- |
 | **On-Chain `SetPage`** | Encrypted directly inside the LNS name's on-chain Page account (`MAX_SEALED_PAGE_LEN = 80 * 1024` bytes; keep raw HTML **≤ 78 KB**) | ~78 KB raw UTF-8 HTML | Single-page sites, manifestos, announcements, landing pages that need zero storage node | `names page set <name>` / `set_page` |
+| **Per-folder links lists** (`lns-links/1`, recommended for multi-page sites) | Each file and each folder's list is its own Logos Storage CID; the name holds the root list | Unlimited | Real sites: `name/path` addresses, update one file = re-upload it plus its parent lists + one ~250k profile tx | `cid`, `cid.sha256`, `cid.type = links` (publish with `node lns-gateway/publish.mjs <folder> <name> --storage http://<node>/api/storage/v1`) |
 | **Logos Storage CID** | Content-addressed on a Logos Storage node (`single` HTML file or `logos-site` v1 multi-file manifest), pinned by hash on the LNS profile | Unlimited (keep assets lean for fast sync) | Multi-page sites, images, CSS/JS bundles, docs, web apps | `cid`, `cid.sha256`, `cid.type` (`single` or `manifest`) |
 
 > **Rule of thumb:** If a page is a self-contained single HTML document under **78 KB**, it can be published in *either* mode. If it has multiple files or exceeds 78 KB, use **Logos Storage CID**.
 
 ---
+
+> **Basecamp 0.3.0 renders with WebKit** in its own window (full CSS, web fonts, locked-down JS,
+> see README). Engineering rules learned the hard way: never write `WebView.settings.*` after the view
+> is created (it SIGSEGVs Qt's macOS WebView, taking Basecamp down); create the WebView only after its
+> window is shown (otherwise the first URL can be dropped); never put a WebView inside the Basecamp tab
+> or glue a window over it (QQuickWidget host, logos-co/logos-basecamp#574). Tests: `node --test
+> basecamp/logic.test.mjs`, `node --test lns-gateway/test/*.test.mjs` (Node 24+), `cargo test` in
+> `basecamp-module/rust-lib` (needs `logos-rust-sdk-src` from logos-module-builder, Rust >= 1.86).
 
 ## 2. Non-Negotiable Security & Zero-Leak Rules
 
